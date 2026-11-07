@@ -1,0 +1,4 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+export const metadata: Metadata = { title: "Masuk", description: "Informasi akses masuk XYNOSS Relay." };
+export default function Masuk() { return <main className="access-page"><div className="wrap access-layout"><div><p className="overline">AKSES RELAY / MASUK</p><h1>Senang ingin<br /><em>bertemu lagi.</em></h1><p className="interior-lead">Halaman masuk sedang disiapkan. Untuk saat ini, akses akun belum tersedia.</p><div className="access-actions"><Link className="button button-dark" href="/roadmap">Lihat arah pengembangan <span className="arrow">&#8599;</span></Link><Link className="text-link" href="/">Kembali ke beranda &#8599;</Link></div></div><div className="access-art" aria-hidden="true"><span>&#10035;</span><p>SAMPAI JUMPA<br />DI RELAY.</p></div></div></main>; }

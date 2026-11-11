@@ -1,39 +1,141 @@
-const Arrow = ({ diagonal = false }: { diagonal?: boolean }) => <span aria-hidden="true" className="arrow">{diagonal ? "\u2197" : "\u2192"}</span>;
-
-import { Mark } from "./shared";
-
+import Link from "next/link";
 import { ProductDemo } from "./product-demo";
-
+import { Signal } from "./signal";
 export default function Home() {
   return (
-    <main>
-      <section className="hero wrap" id="top">
-        <div className="hero-copy">
-          <div className="eyebrow"><span className="status-dot" /> SEBUAH CARA BARU UNTUK TERHUBUNG</div>
-          <h1>Ngobrol saja.<br /><em>Selebihnya,</em><br />biar ringan<span className="period">.</span></h1>
-          <p className="hero-description">Untuk cerita panjang, kabar singkat, dan semua hal di antaranya. Ada ruang yang terasa pas untuk setiap percakapan.</p>
-          <div className="hero-actions"><a className="button button-dark" href="#tentang">Jelajahi Relay <Arrow diagonal /></a><span className="action-note">Lebih dekat, tanpa<br />banyak sekat.</span></div>
+    <main className="home-page">
+      <section className="home-hero wrap" id="top">
+        <div className="hero-heading">
+          <p className="eyebrow">
+            <span className="status-dot" /> SEDANG DISIAPKAN. UNTUK CERITAMU.
+          </p>
+          <h1>
+            Kurangi ribet.
+            <br />
+            Tambah{" "}
+            <span>
+              dekat
+              <svg viewBox="0 0 600 36" aria-hidden="true">
+                <path d="M8 22Q260 -4 590 16" />
+              </svg>
+            </span>
+            <i>.</i>
+          </h1>
+          <div className="hero-intro">
+            <p>
+              Obrolan panjang. Kabar singkat. Atau sekadar,
+              <br className="desktop-break" /> &ldquo;hei, kamu apa
+              kabar?&rdquo;
+              <br />
+              Ada ruang untuk semuanya.
+            </p>
+            <Link className="button button-dark" href="/features">
+              Kenalan dengan Relay <span>&#8599;</span>
+            </Link>
+          </div>
         </div>
-        <ProductDemo />
-        <div className="hero-foot"><span>MESSAGING WITHOUT THE WEIGHT.</span><span>GULIR UNTUK MENJELAJAHI <span className="down">&#8595;</span></span></div>
-      </section>
-
-      <section className="manifesto" id="tentang">
-        <div className="wrap manifesto-inner"><div className="section-label"><span>01 / TENTANG RELAY</span><span className="label-line" /></div><div className="manifesto-copy"><p className="tiny-heading">HAL BAIK DIMULAI DARI SAPAAN.</p><h2>Yang penting bukan<br />aplikasinya. <span>Yang penting<br />adalah ceritanya.</span></h2><div className="manifesto-bottom"><div className="asterisk">&#10035;</div><p>XYNOSS Relay lahir dari gagasan sederhana: teknologi seharusnya memberi ruang untuk lebih dekat, bukan membuatnya terasa rumit.</p></div></div></div>
-      </section>
-
-      <section className="principles wrap" id="gagasan">
-        <div className="section-label"><span>02 / GAGASAN KAMI</span><span className="label-line" /></div>
-        <div className="principles-heading"><div><p className="tiny-heading">SEDIKIT LEBIH SEDERHANA</p><h2>Lebih sedikit distraksi.<br /><em>Lebih banyak koneksi.</em></h2></div><p>Karena rasanya menyenangkan ketika percakapan bisa mengalir begitu saja.</p></div>
-        <div className="principle-list">
-          <article><span className="number">01</span><div><h3>Ringan rasanya.</h3><p>Ruang yang memberi napas, supaya perhatian tetap pada orang dan cerita di dalamnya.</p></div><span className="principle-icon">&#9676;</span></article>
-          <article><span className="number">02</span><div><h3>Sederhana caranya.</h3><p>Hal-hal yang penting dibuat terasa alami. Tak perlu berpikir panjang untuk mulai menyapa.</p></div><span className="principle-icon">&#8599;</span></article>
-          <article><span className="number">03</span><div><h3>Dekat maknanya.</h3><p>Dari sapaan pertama sampai obrolan larut malam, setiap momen punya tempatnya.</p></div><span className="principle-icon">&#10035;</span></article>
+        <div className="hero-showcase">
+          <div className="hero-side-label">
+            LESS APP.
+            <br />
+            MORE CONVERSATION.
+          </div>
+          <ProductDemo />
+          <div className="hero-sticker" aria-hidden="true">
+            halo<span>&#10035;</span>
+          </div>
+        </div>
+        <div className="hero-baseline">
+          <span>MESSAGING WITHOUT THE WEIGHT.</span>
+          <a href="#cerita">ADA CERITA DI BAWAH &#8595;</a>
         </div>
       </section>
-
-      <section className="closing" id="kenalan"><div className="wrap closing-inner"><div className="closing-top"><span>03 / SAMPAI JUMPA DI RELAY</span><Mark /></div><div className="closing-main"><p>UNTUK SETIAP CERITA YANG MENUNGGU DIMULAI</p><h2>Halo, <em>percakapan</em><br />yang lebih ringan<span>.</span></h2><p className="closing-desc">XYNOSS Relay sedang disiapkan. Sampai saatnya tiba, mari beri ruang untuk percakapan yang lebih berarti.</p><a className="button button-light" href="/features">Kenali produknya <Arrow diagonal /></a></div><div className="closing-stamp">LESS APP.<br /><span>MORE</span><br />CONVERSATION.</div></div></section>
-
+      <section className="story-panel wrap" id="cerita">
+        <div className="story-visual">
+          <Signal />
+          <span className="visual-caption">
+            SATU SAPAAN BISA MEMBAWA KITA JAUH.
+          </span>
+        </div>
+        <div className="story-copy">
+          <p className="overline">01 / RUANG UNTUK YANG BERARTI</p>
+          <h2>
+            Bukan sibuk
+            <br />
+            di aplikasinya.
+            <br />
+            <em>Asyik di ceritanya.</em>
+          </h2>
+          <p>
+            Kami membayangkan messenger yang tahu kapan harus hadir, dan kapan
+            harus memberi ruang. Supaya perhatianmu tetap pada orang di seberang
+            layar.
+          </p>
+          <Link className="text-link" href="/about">
+            Ada alasan di baliknya <span>&#8599;</span>
+          </Link>
+        </div>
+      </section>
+      <section className="home-statement">
+        <div className="wrap">
+          <p className="overline">02 / GAGASAN YANG MENUNTUN KAMI</p>
+          <h2>
+            Yang ringan
+            <br />
+            bisa terasa
+            <br />
+            <span>begitu berarti.</span>
+          </h2>
+          <div className="statement-bottom">
+            <span className="statement-star" aria-hidden="true">
+              &#10035;
+            </span>
+            <p>
+              Sederhana caranya. Dekat maknanya.
+              <br />
+              Itulah arah yang ingin kami bawa ke setiap keputusan tentang
+              Relay.
+            </p>
+            <Link
+              className="round-link"
+              href="/roadmap"
+              aria-label="Lihat arah pengembangan"
+            >
+              &#8599;
+            </Link>
+          </div>
+        </div>
+      </section>
+      <section className="home-reading wrap">
+        <div className="reading-heading">
+          <p className="overline">03 / DARI BALIK LAYAR</p>
+          <h2>
+            Masih dirangkai.
+            <br />
+            <em>Sudah punya cerita.</em>
+          </h2>
+        </div>
+        <div className="reading-links">
+          <Link href="/blog">
+            <span>JURNAL / 01</span>
+            <h3>
+              Untuk apa semua ini
+              <br />
+              dibuat lebih sederhana?
+            </h3>
+            <b aria-hidden="true">&#8599;</b>
+          </Link>
+          <Link href="/patch-notes">
+            <span>CATATAN PEMBARUAN</span>
+            <h3>
+              Langkah kecil berikutnya.
+              <br />
+              Sewaktu sudah siap.
+            </h3>
+            <b aria-hidden="true">&#8599;</b>
+          </Link>
+        </div>
+      </section>
     </main>
   );
 }

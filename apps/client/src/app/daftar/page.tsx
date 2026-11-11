@@ -1,4 +1,2 @@
-import type { Metadata } from "next";
-import Link from "next/link";
-export const metadata: Metadata = { title: "Daftar", description: "Informasi pendaftaran XYNOSS Relay." };
-export default function Daftar() { return <main className="access-page"><div className="wrap access-layout"><div><p className="overline">AKSES RELAY / DAFTAR</p><h1>Setiap cerita<br /><em>punya awal.</em></h1><p className="interior-lead">Pendaftaran belum dibuka. Sambil menunggu, kenali gagasan dan arah yang sedang kami siapkan untuk Relay.</p><div className="access-actions"><Link className="button button-dark" href="/features">Kenali Relay <span className="arrow">&#8599;</span></Link><Link className="text-link" href="/roadmap">Lihat arah pengembangan &#8599;</Link></div></div><div className="access-art" aria-hidden="true"><span>&#10035;</span><p>UNTUK CERITA<br />YANG AKAN DATANG.</p></div></div></main>; }
+import { redirect } from "next/navigation";
+export default function Page() { redirect("/register"); }

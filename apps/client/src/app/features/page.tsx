@@ -1,4 +1,145 @@
 import type { Metadata } from "next";
 import { PageEnd } from "../shared";
-export const metadata: Metadata = { title: "Mengenal produk", description: "Kenali gagasan pengalaman komunikasi yang lebih ringan di XYNOSS Relay." };
-export default function Features() { return <main className="interior features-page"><section className="wrap interior-hero feature-hero"><div><p className="overline">01 / MENGENAL PRODUK</p><h1>Ruang untuk<br /><em>jadi dekat.</em></h1><p className="interior-lead">Sebuah messenger untuk hal yang paling penting: percakapan itu sendiri.</p><a className="text-link" href="#pengalaman">Lihat gagasannya <span>&#8595;</span></a></div><div className="feature-art" aria-label="Ilustrasi konsep percakapan"><div className="art-ring ring-a"/><div className="art-ring ring-b"/><div className="art-message msg-a">Hei, lagi apa? <span>&#10035;</span></div><div className="art-message msg-b">Lagi mikirin cerita<br />yang mau kubagi.</div><div className="art-message msg-c">Aku dengerin. <span>&#9825;</span></div><small>SEBUAH ILUSTRASI, BUKAN TAMPILAN FINAL</small></div></section><section className="wrap feature-story" id="pengalaman"><div className="section-label">PENGALAMAN YANG DITUJU <span className="label-line"/></div><div><h2>Lebih sedikit yang menghalangi.<br /><em>Lebih banyak yang terasa.</em></h2><p>Relay dibayangkan sebagai tempat untuk menyapa tanpa perlu berhadapan dengan kerumitan. Bukan soal melakukan segalanya, melainkan memberi ruang bagi hal yang ingin kamu sampaikan.</p></div></section><section className="experience-band"><div className="wrap"><div className="experience-intro"><p className="overline">POTONGAN PENGALAMAN</p><h2>Dibuat untuk<br /><em>mengalir.</em></h2><p>Begini arah yang ingin kami tuju, dari sapaan pertama hingga cerita berikutnya.</p></div><div className="experience-steps"><article><span>01 / MENYAPA</span><h3>Mulai dari yang sederhana.</h3><p>Ruang yang mudah dipahami membuat memulai percakapan terasa lebih alami.</p></article><article><span>02 / BERBAGI</span><h3>Cerita mendapat tempat.</h3><p>Pesan singkat atau obrolan panjang, keduanya layak mendapat perhatian yang sama.</p></article><article><span>03 / KEMBALI</span><h3>Lanjut kapan saja.</h3><p>Pengalaman yang tenang memberi ruang untuk kembali ke hal yang berarti.</p></article></div></div></section><section className="wrap status-section"><div><p className="overline">CATATAN STATUS</p><h2>Gagasan hari ini.<br /><em>Produk yang bertumbuh.</em></h2></div><div className="status-copy"><p>Visual dan pengalaman di halaman ini adalah arah konsep, bukan daftar fitur yang sudah tersedia.</p><div className="status-row"><span>Tersedia</span><p>Belum ada kemampuan yang dapat kami pastikan tersedia untuk publik.</p></div><div className="status-row"><span>Dalam pengembangan</span><p>Relay sedang disiapkan; rincian kemampuan belum diumumkan.</p></div><div className="status-row"><span>Direncanakan</span><p>Pengalaman berkirim pesan yang ringan menjadi arah produk, dengan detail yang masih dapat berubah.</p></div></div></section><PageEnd eyebrow="LANJUTKAN PERJALANAN" title="Setiap gagasan punya alasan." href="/about" link="Cerita di balik Relay" /></main>; }
+export const metadata: Metadata = {
+  title: "Mengenal produk",
+  description:
+    "Kenali gagasan pengalaman komunikasi yang lebih ringan di XYNOSS Relay.",
+};
+export default function Features() {
+  return (
+    <main className="interior features-page">
+      <section className="wrap interior-hero feature-hero">
+        <div>
+          <p className="overline">01 / MENGENAL PRODUK</p>
+          <h1>
+            Ruang untuk
+            <br />
+            <em>jadi dekat.</em>
+          </h1>
+          <p className="interior-lead">
+            Sebuah messenger untuk hal yang paling penting: percakapan itu
+            sendiri.
+          </p>
+          <a className="text-link" href="#pengalaman">
+            Lihat gagasannya <span>&#8595;</span>
+          </a>
+        </div>
+        <div className="feature-art" aria-label="Ilustrasi konsep percakapan">
+          <div className="art-ring ring-a" />
+          <div className="art-ring ring-b" />
+          <div className="art-message msg-a">
+            Hei, lagi apa? <span>&#10035;</span>
+          </div>
+          <div className="art-message msg-b">
+            Lagi mikirin cerita
+            <br />
+            yang mau kubagi.
+          </div>
+          <div className="art-message msg-c">
+            Aku dengerin. <span>&#9825;</span>
+          </div>
+          <small>SEBUAH ILUSTRASI, BUKAN TAMPILAN FINAL</small>
+        </div>
+      </section>
+      <section className="wrap feature-story" id="pengalaman">
+        <div className="section-label">
+          PENGALAMAN YANG DITUJU <span className="label-line" />
+        </div>
+        <div>
+          <h2>
+            Lebih sedikit yang menghalangi.
+            <br />
+            <em>Lebih banyak yang terasa.</em>
+          </h2>
+          <p>
+            Relay dibayangkan sebagai tempat untuk menyapa tanpa perlu
+            berhadapan dengan kerumitan. Bukan soal melakukan segalanya,
+            melainkan memberi ruang bagi hal yang ingin kamu sampaikan.
+          </p>
+        </div>
+      </section>
+      <section className="experience-band">
+        <div className="wrap">
+          <div className="experience-intro">
+            <p className="overline">POTONGAN PENGALAMAN</p>
+            <h2>
+              Dibuat untuk
+              <br />
+              <em>mengalir.</em>
+            </h2>
+            <p>
+              Begini arah yang ingin kami tuju, dari sapaan pertama hingga
+              cerita berikutnya.
+            </p>
+          </div>
+          <div className="experience-steps">
+            <article>
+              <span>01 / MENYAPA</span>
+              <h3>Mulai dari yang sederhana.</h3>
+              <p>
+                Ruang yang mudah dipahami membuat memulai percakapan terasa
+                lebih alami.
+              </p>
+            </article>
+            <article>
+              <span>02 / BERBAGI</span>
+              <h3>Cerita mendapat tempat.</h3>
+              <p>
+                Pesan singkat atau obrolan panjang, keduanya layak mendapat
+                perhatian yang sama.
+              </p>
+            </article>
+            <article>
+              <span>03 / KEMBALI</span>
+              <h3>Lanjut kapan saja.</h3>
+              <p>
+                Pengalaman yang tenang memberi ruang untuk kembali ke hal yang
+                berarti.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+      <section className="wrap status-section">
+        <div>
+          <p className="overline">CATATAN STATUS</p>
+          <h2>
+            Gagasan hari ini.
+            <br />
+            <em>Produk yang bertumbuh.</em>
+          </h2>
+        </div>
+        <div className="status-copy">
+          <p>
+            Visual dan pengalaman di halaman ini adalah arah konsep, bukan
+            daftar fitur yang sudah tersedia.
+          </p>
+          <div className="status-row">
+            <span>Tersedia</span>
+            <p>
+              Belum ada kemampuan yang dapat kami pastikan tersedia untuk
+              publik.
+            </p>
+          </div>
+          <div className="status-row">
+            <span>Dalam pengembangan</span>
+            <p>Relay sedang disiapkan; rincian kemampuan belum diumumkan.</p>
+          </div>
+          <div className="status-row">
+            <span>Direncanakan</span>
+            <p>
+              Pengalaman berkirim pesan yang ringan menjadi arah produk, dengan
+              detail yang masih dapat berubah.
+            </p>
+          </div>
+        </div>
+      </section>
+      <PageEnd
+        eyebrow="LANJUTKAN PERJALANAN"
+        title="Setiap gagasan punya alasan."
+        href="/about"
+        link="Cerita di balik Relay"
+      />
+    </main>
+  );
+}

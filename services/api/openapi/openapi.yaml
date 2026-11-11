@@ -1,0 +1,527 @@
+openapi: 3.1.0
+info:
+  title: XYNOSS Relay API
+  description: |
+    Production REST API backend for XYNOSS Relay — messaging without the weight.
+    All data exchange is JSON-encoded over HTTPS. All response payloads follow strict success and error envelopes.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://api.relay.xynoss.com
+    description: Production API
+
+paths:
+  /health/live:
+    get:
+      summary: Liveness probe
+      description: Returns 200 if the backend HTTP process is active and receiving traffic.
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /health/ready:
+    get:
+      summary: Readiness probe
+      description: Checks downstream dependencies such as the Neon PostgreSQL database connection pool.
+      responses:
+        '200':
+          description: All dependencies ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '503':
+          description: One or more critical dependencies unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /v1/health:
+    get:
+      summary: General service health status
+      description: Returns service metadata and active environment.
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+
+  /v1/auth/otp/challenges:
+    post:
+      summary: Request email OTP challenge
+      description: Generates a uniform 6-digit CSPRNG code with 10-minute expiry and anti-enumeration generic response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: "alice@example.com"
+      responses:
+        '202':
+          description: Challenge accepted and code dispatched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '422':
+          description: Invalid email format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /v1/auth/otp/verifications:
+    post:
+      summary: Verify email OTP code
+      description: Validates OTP against atomic row lock in PostgreSQL and issues a secure session cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - challenge_id
+                - code
+              properties:
+                challenge_id:
+                  type: string
+                  format: uuid
+                code:
+                  type: string
+                  example: "123456"
+      responses:
+        '200':
+          description: OTP verified; session cookie set
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "xynoss_session=...; Path=/; HttpOnly; SameSite=Lax"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '401':
+          description: Invalid or expired code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /v1/auth/google/start:
+    get:
+      summary: Start Google OAuth / OIDC flow
+      parameters:
+        - name: return_path
+          in: query
+          required: false
+          schema:
+            type: string
+            example: "/app"
+      responses:
+        '302':
+          description: Redirect to Google Accounts authorization endpoint
+
+  /v1/auth/google/callback:
+    get:
+      summary: Google OAuth callback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirects to frontend return path with session cookie set
+
+  /v1/auth/session:
+    get:
+      summary: Get bootstrap session data
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: Active session details and CSRF token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /v1/auth/logout:
+    post:
+      summary: Logout current session
+      security:
+        - CookieAuth: []
+      responses:
+        '204':
+          description: Session revoked and cookie cleared
+
+  /v1/me:
+    get:
+      summary: Get current authenticated user
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: Current user profile and onboarding status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessEnvelope'
+        '401':
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /v1/me/profile:
+    get:
+      summary: Get current user profile
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: User profile details
+    patch:
+      summary: Update user profile
+      security:
+        - CookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/IfMatchHeader'
+        - $ref: '#/components/parameters/CSRFHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name:
+                  type: string
+                bio:
+                  type: string
+                username:
+                  type: string
+                availability:
+                  type: string
+                  enum: [online, idle, dnd, offline]
+                custom_status:
+                  type: string
+                revision:
+                  type: integer
+      responses:
+        '200':
+          description: Profile updated
+        '409':
+          description: Username already taken
+        '412':
+          description: Revision mismatch
+
+  /v1/me/sessions:
+    get:
+      summary: List active sessions for current user
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: Array of active sessions with device labels
+
+  /v1/me/sessions/{session_id}:
+    delete:
+      summary: Revoke an active session
+      security:
+        - CookieAuth: []
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Session revoked
+
+  /v1/me/onboarding/complete:
+    post:
+      summary: Complete initial user onboarding
+      security:
+        - CookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CSRFHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - display_name
+              properties:
+                display_name:
+                  type: string
+                username:
+                  type: string
+      responses:
+        '200':
+          description: Onboarding marked completed
+
+  /v1/users/me/avatar:
+    post:
+      summary: Attach finalized media as avatar
+      security:
+        - CookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CSRFHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - media_id
+              properties:
+                media_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Avatar updated
+        '403':
+          description: Unauthorized to attach media owned by another user
+    delete:
+      summary: Remove profile avatar
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: Avatar removed
+
+  /v1/users/me/banner:
+    post:
+      summary: Attach finalized media as profile banner
+      security:
+        - CookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CSRFHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - media_id
+              properties:
+                media_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Banner updated
+    delete:
+      summary: Remove profile banner
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: Banner removed
+
+  /v1/media/uploads:
+    post:
+      summary: Request direct upload intent / signed URL
+      security:
+        - CookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - purpose
+                - content_type
+                - size_bytes
+              properties:
+                purpose:
+                  type: string
+                  enum: [avatar, banner]
+                content_type:
+                  type: string
+                  enum: [image/jpeg, image/png, image/webp]
+                size_bytes:
+                  type: integer
+                checksum:
+                  type: string
+      responses:
+        '201':
+          description: Upload intent generated with signed URL
+
+  /v1/media/{media_id}/finalize:
+    post:
+      summary: Finalize and verify uploaded media content
+      security:
+        - CookieAuth: []
+      parameters:
+        - name: media_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Media verified against magic bytes and marked ready
+        '403':
+          description: Unauthorized media ownership
+        '422':
+          description: Corrupted image or spoofed MIME type
+
+  /v1/internal/ping:
+    get:
+      summary: Internal service health and identity verification
+      parameters:
+        - name: X-Internal-API-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Trusted internal service verified
+        '401':
+          description: Invalid or missing internal API key
+
+components:
+  securitySchemes:
+    CookieAuth:
+      type: apiKey
+      in: cookie
+      name: xynoss_session
+
+  parameters:
+    RequestIDHeader:
+      name: X-Request-ID
+      in: header
+      description: Correlation ID for request tracing
+      required: false
+      schema:
+        type: string
+        format: uuid
+
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      description: Unique key to prevent duplicate processing of mutations
+      required: false
+      schema:
+        type: string
+
+    IfMatchHeader:
+      name: If-Match
+      in: header
+      description: Optimistic concurrency revision check
+      required: false
+      schema:
+        type: string
+
+    CSRFHeader:
+      name: X-CSRF-Token
+      in: header
+      description: CSRF prevention token bound to active session
+      required: false
+      schema:
+        type: string
+
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required:
+        - data
+        - request_id
+      properties:
+        data:
+          type: object
+        meta:
+          type: object
+          properties:
+            next_cursor:
+              type: string
+            has_more:
+              type: boolean
+        request_id:
+          type: string
+          format: uuid
+
+    ErrorDetail:
+      type: object
+      required:
+        - field
+        - code
+      properties:
+        field:
+          type: string
+        code:
+          type: string
+
+    ErrorBody:
+      type: object
+      required:
+        - code
+        - message
+        - request_id
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorDetail'
+        request_id:
+          type: string
+          format: uuid
+
+    ErrorEnvelope:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorBody'

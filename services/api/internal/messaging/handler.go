@@ -25,6 +25,12 @@ type Handler struct{ pool *pgxpool.Pool }
 func NewHandler(pool *pgxpool.Pool) *Handler { return &Handler{pool: pool} }
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
+	h.registerMessageActions(r, "channelID")
+	r.Get("/{channelID}/read", h.channelRead)
+	r.Post("/{channelID}/read", h.channelRead)
+	r.Get("/{channelID}/access", h.listPrivateAccess)
+	r.Put("/{channelID}/access", h.grantPrivateAccess)
+	r.Delete("/{channelID}/access/{userID}", h.revokePrivateAccess)
 	r.Get("/{channelID}/messages", h.list)
 	r.Post("/{channelID}/messages", h.send)
 	return r
@@ -38,9 +44,9 @@ type Message struct {
 	Username  string    `json:"username"`
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
+	Revision  int       `json:"revision"`
 }
 
-// authorize deliberately excludes private channels until channel ACLs are enforced.
 func (h *Handler) authorize(r *http.Request) (string, string, error) {
 	actor, ok := authctx.GetActor(r.Context())
 	if !ok || actor.UserID == "" {
@@ -57,7 +63,7 @@ func (h *Handler) authorize(r *http.Request) (string, string, error) {
 	err := h.pool.QueryRow(r.Context(), `SELECT EXISTS (
 		SELECT 1 FROM channels c JOIN workspaces w ON w.id=c.workspace_id
 		JOIN memberships m ON m.workspace_id=w.id AND m.user_id=$2 AND m.state='active'
-		WHERE c.id=$1 AND c.deleted_at IS NULL AND w.deleted_at IS NULL AND c.visibility='public'
+		WHERE c.id=$1 AND c.deleted_at IS NULL AND w.deleted_at IS NULL AND (c.visibility='public' OR w.owner_user_id=$2 OR EXISTS(SELECT 1 FROM channel_acl a WHERE a.channel_id=c.id AND a.subject_type='user' AND a.subject_id=$2 AND a.capability='channel.read' AND a.effect='allow'))
 	)`, id, actor.UserID).Scan(&allowed)
 	if err != nil {
 		return "", "", response.NewInternalError(err)
@@ -74,14 +80,19 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		response.RenderError(w, r, err)
 		return
 	}
+	before, limit, err := historyPage(r)
+	if err != nil {
+		response.RenderError(w, r, err)
+		return
+	}
 	rows, err := h.pool.Query(r.Context(), `SELECT m.id, m.sequence, m.author_id,
-		COALESCE(NULLIF(p.display_name,''),u.username,'Pengguna'), COALESCE(u.username,''), m.text, m.created_at
+		COALESCE(NULLIF(p.display_name,''),u.username,'Pengguna'), COALESCE(u.username,''), m.text, m.created_at,m.revision
 		FROM messages m JOIN conversations c ON c.id=m.conversation_id
-		JOIN channels ch ON ch.id=c.channel_id AND ch.deleted_at IS NULL AND ch.visibility='public'
+		JOIN channels ch ON ch.id=c.channel_id AND ch.deleted_at IS NULL
 		JOIN workspaces w ON w.id=ch.workspace_id AND w.deleted_at IS NULL
 		JOIN memberships member ON member.workspace_id=w.id AND member.user_id=$2 AND member.state='active'
 		JOIN users u ON u.id=m.author_id LEFT JOIN profiles p ON p.user_id=u.id
-		WHERE c.channel_id=$1 AND m.deleted_at IS NULL ORDER BY m.sequence DESC LIMIT 100`, id, actor)
+		WHERE c.channel_id=$1 AND m.deleted_at IS NULL AND ($3::bigint = 0 OR m.sequence < $3) AND (ch.visibility='public' OR w.owner_user_id=$2 OR EXISTS(SELECT 1 FROM channel_acl a WHERE a.channel_id=ch.id AND a.subject_type='user' AND a.subject_id=$2 AND a.capability='channel.read' AND a.effect='allow')) ORDER BY m.sequence DESC LIMIT $4`, id, actor, before, limit)
 	if err != nil {
 		response.RenderError(w, r, response.NewInternalError(err))
 		return
@@ -90,7 +101,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	items := make([]Message, 0)
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Sequence, &m.AuthorID, &m.Author, &m.Username, &m.Text, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Sequence, &m.AuthorID, &m.Author, &m.Username, &m.Text, &m.CreatedAt, &m.Revision); err != nil {
 			response.RenderError(w, r, response.NewInternalError(err))
 			return
 		}
@@ -146,7 +157,7 @@ func (h *Handler) send(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	// The membership check is repeated inside the transaction immediately before writing.
 	var workspaceID string
-	err = tx.QueryRow(r.Context(), `SELECT c.workspace_id FROM channels c JOIN workspaces w ON w.id=c.workspace_id JOIN memberships m ON m.workspace_id=w.id AND m.user_id=$2 AND m.state='active' WHERE c.id=$1 AND c.visibility='public' AND c.deleted_at IS NULL AND w.deleted_at IS NULL FOR SHARE OF c,w,m`, id, actor).Scan(&workspaceID)
+	err = tx.QueryRow(r.Context(), `SELECT c.workspace_id FROM channels c JOIN workspaces w ON w.id=c.workspace_id JOIN memberships m ON m.workspace_id=w.id AND m.user_id=$2 AND m.state='active' WHERE c.id=$1 AND c.deleted_at IS NULL AND w.deleted_at IS NULL AND (c.visibility='public' OR w.owner_user_id=$2 OR EXISTS(SELECT 1 FROM channel_acl a WHERE a.channel_id=c.id AND a.subject_type='user' AND a.subject_id=$2 AND a.capability='channel.read' AND a.effect='allow')) FOR SHARE OF c,w,m`, id, actor).Scan(&workspaceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		response.RenderError(w, r, response.NewNotFoundError("channel not found"))
 		return

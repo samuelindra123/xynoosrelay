@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -39,15 +40,20 @@ type Service struct {
 	store        Store
 	mediaService *media.Service
 	storageProv  storage.StorageProvider
+	mediaURLBase string
 }
 
 // NewService constructs a new users service instance.
-func NewService(store Store, mediaService *media.Service, storageProv storage.StorageProvider) *Service {
-	return &Service{
+func NewService(store Store, mediaService *media.Service, storageProv storage.StorageProvider, apiBaseURL ...string) *Service {
+	s := &Service{
 		store:        store,
 		mediaService: mediaService,
 		storageProv:  storageProv,
 	}
+	if len(apiBaseURL) > 0 {
+		s.mediaURLBase = strings.TrimRight(strings.TrimSpace(apiBaseURL[0]), "/")
+	}
+	return s
 }
 
 // GetCurrentUser returns the standardized current user view for /v1/me.
@@ -274,17 +280,47 @@ func (s *Service) CompleteOnboarding(ctx context.Context, userID, displayName st
 func (s *Service) resolveMediaURLs(ctx context.Context, p *Profile) {
 	if p.AvatarMediaID != nil {
 		if m, err := s.mediaService.GetMedia(ctx, *p.AvatarMediaID); err == nil && m.Status == media.StatusReady {
-			p.AvatarURL = &m.URL
+			resolved := s.profileMediaURL(*p.AvatarMediaID, m.URL)
+			p.AvatarURL = &resolved
 		}
 	}
 	if p.BannerMediaID != nil {
 		if m, err := s.mediaService.GetMedia(ctx, *p.BannerMediaID); err == nil && m.Status == media.StatusReady {
-			p.BannerURL = &m.URL
+			resolved := s.profileMediaURL(*p.BannerMediaID, m.URL)
+			p.BannerURL = &resolved
 		}
 	}
 }
 
 // SearchUsers searches the user directory by username, display name, or email.
 func (s *Service) SearchUsers(ctx context.Context, query string, limit int) ([]*UserSearchResult, error) {
-	return s.store.SearchUsers(ctx, query, limit)
+	results, err := s.store.SearchUsers(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	if s.mediaService == nil {
+		return results, nil
+	}
+	for _, result := range results {
+		if result.AvatarMediaID != nil {
+			if m, mediaErr := s.mediaService.GetMedia(ctx, *result.AvatarMediaID); mediaErr == nil && m.Status == media.StatusReady {
+				resolved := s.profileMediaURL(*result.AvatarMediaID, m.URL)
+				result.AvatarURL = &resolved
+			}
+		}
+		if result.BannerMediaID != nil {
+			if m, mediaErr := s.mediaService.GetMedia(ctx, *result.BannerMediaID); mediaErr == nil && m.Status == media.StatusReady {
+				resolved := s.profileMediaURL(*result.BannerMediaID, m.URL)
+				result.BannerURL = &resolved
+			}
+		}
+	}
+	return results, nil
+}
+
+func (s *Service) profileMediaURL(mediaID, fallback string) string {
+	if s.mediaURLBase == "" {
+		return fallback
+	}
+	return s.mediaURLBase + "/v1/media/profile/" + url.PathEscape(mediaID)
 }

@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/xynoss/relay/services/api/internal/authctx"
 	"github.com/xynoss/relay/services/api/internal/response"
 	"github.com/xynoss/relay/services/api/internal/storage"
@@ -15,14 +17,21 @@ import (
 
 // Handler exposes the HTTP routes for media upload intents, finalization, and serving.
 type Handler struct {
-	service *Service
+	service       *Service
+	profileAccess interface {
+		IsProfileMedia(context.Context, string) (bool, error)
+	}
 }
 
 // NewHandler constructs a media HTTP handler.
-func NewHandler(service *Service) *Handler {
-	return &Handler{
-		service: service,
+func NewHandler(service *Service, profileAccess ...interface {
+	IsProfileMedia(context.Context, string) (bool, error)
+}) *Handler {
+	h := &Handler{service: service}
+	if len(profileAccess) > 0 {
+		h.profileAccess = profileAccess[0]
 	}
+	return h
 }
 
 // Routes returns the Chi router for /v1/media.
@@ -32,6 +41,7 @@ func (h *Handler) Routes(requireAuth func(http.Handler) http.Handler) chi.Router
 	// Direct upload & content serving routes for local development provider
 	r.Put("/content/upload", h.HandleLocalDirectUpload)
 	r.Get("/content/*", h.ServeLocalContent)
+	r.Get("/profile/{media_id}", h.ServeProfileMedia)
 
 	// Authenticated media management routes
 	r.Group(func(authGroup chi.Router) {
@@ -46,6 +56,45 @@ func (h *Handler) Routes(requireAuth func(http.Handler) http.Handler) chi.Router
 	})
 
 	return r
+}
+
+// ServeProfileMedia streams only ready images that remain attached to a user profile.
+// It lets browsers display images stored in a private object-storage bucket without
+// exposing storage credentials or making unattached uploads public.
+func (h *Handler) ServeProfileMedia(w http.ResponseWriter, r *http.Request) {
+	mediaID := chi.URLParam(r, "media_id")
+	if _, err := uuid.Parse(mediaID); err != nil || h.profileAccess == nil {
+		http.NotFound(w, r)
+		return
+	}
+	attached, err := h.profileAccess.IsProfileMedia(r.Context(), mediaID)
+	if err != nil {
+		response.RenderError(w, r, response.NewServiceUnavailableError("profile media is unavailable"))
+		return
+	}
+	if !attached {
+		http.NotFound(w, r)
+		return
+	}
+	content, contentType, err := h.service.GetProfileContent(r.Context(), mediaID)
+	if err != nil {
+		if errors.Is(err, ErrMediaNotFound) || errors.Is(err, ErrInvalidMediaState) {
+			http.NotFound(w, r)
+			return
+		}
+		response.RenderError(w, r, response.NewServiceUnavailableError("profile media is unavailable"))
+		return
+	}
+	defer content.Close()
+	if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/webp" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = io.Copy(w, content)
 }
 
 func (h *Handler) CreateUploadIntent(w http.ResponseWriter, r *http.Request) {

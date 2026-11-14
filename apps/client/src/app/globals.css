@@ -1108,6 +1108,45 @@ em {
   grid-template-columns: 1fr 3fr;
   gap: 60px;
 }
+.journal-timeline {
+  display: grid;
+  grid-template-columns: 1fr 3fr;
+  gap: 60px;
+}
+.journal-entries { border-top: 1px solid #c8c1b2; }
+.journal-entry {
+  position: relative;
+  display: grid;
+  grid-template-columns: 145px minmax(0, 1fr) 44px;
+  gap: 24px;
+  padding: 38px 0 48px;
+  border-bottom: 1px solid #c8c1b2;
+}
+.journal-entry-meta, .notes-entry-date {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #6d7564;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.journal-entry-meta time, .notes-entry-date time { color: #283b30; font-weight: 700; }
+.journal-entry h2 { margin: 12px 0; font-size: clamp(27px, 3vw, 42px); line-height: 1.12; }
+.journal-entry .journal-deck { margin: 16px 0 20px; }
+.journal-entry .journal-body { margin: 0; }
+.journal-entry-number, .notes-entry-version { color: #9b684e; font: 16px Georgia, serif; text-align: right; }
+.notes-timeline { border-top: 1px solid #bec6b5; }
+.notes-entry {
+  display: grid;
+  grid-template-columns: 145px minmax(0, 1fr) 60px;
+  gap: 24px;
+  padding: 34px 0;
+  border-bottom: 1px solid #bec6b5;
+}
+.notes-entry-heading h2 { margin: 10px 0 16px; font-size: clamp(24px, 2.5vw, 34px); }
+.notes-entry-content ul { margin: 0; padding-left: 19px; color: #596457; font-size: 14px; line-height: 1.8; }
+.notes-entry-content li + li { margin-top: 6px; }
+.notes-disclaimer { margin-top: 24px; color: #70796b; font-size: 12px; line-height: 1.7; }
 .journal-index {
   font-size: 9px;
   letter-spacing: 0.12em;
@@ -2242,6 +2281,7 @@ em {
   .feature-story,
   .letter-grid,
   .journal-feature-grid,
+  .journal-timeline,
   .notes-content,
   .legal-layout {
     grid-template-columns: 1fr;
@@ -2698,6 +2738,14 @@ em {
   .journal-feature {
     padding: 65px 0;
   }
+  .journal-timeline { grid-template-columns: 1fr; gap: 30px; }
+  .journal-entry, .notes-entry { grid-template-columns: 1fr 34px; gap: 16px; }
+  .journal-entry-meta, .notes-entry-date { grid-column: 1 / -1; flex-direction: row; gap: 14px; }
+  .journal-entry-number, .notes-entry-version { grid-column: 2; grid-row: 2; }
+  .journal-entry > div:nth-child(2), .notes-entry-content { grid-column: 1 / -1; }
+  .journal-entry-number { grid-row: 1; align-self: start; }
+  .notes-entry-version { display: none; }
+  .notes-entry { gap: 10px; }
   .journal-index {
     flex-direction: row;
     justify-content: space-between;

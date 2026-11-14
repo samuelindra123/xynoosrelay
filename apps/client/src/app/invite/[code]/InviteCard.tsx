@@ -11,6 +11,7 @@ import {
   AlertCircle,
   Link2Off,
   Compass,
+  RefreshCw,
 } from "lucide-react";
 import {
   api,
@@ -29,7 +30,7 @@ interface CurrentUser {
 
 type CardState =
   | { type: "loading" }
-  | { type: "invalid"; message?: string }
+  | { type: "invalid"; message?: string; retryable?: boolean }
   | {
       type: "guest";
       preview: InvitePreviewEntity;
@@ -114,6 +115,7 @@ export default function InviteCard({ code }: { code: string }) {
   const [isAccepting, setIsAccepting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
   const [acceptError, setAcceptError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
 
   // Initialize and evaluate 5-state machine
   useEffect(() => {
@@ -129,9 +131,9 @@ export default function InviteCard({ code }: { code: string }) {
           if (!active) return;
           const msg =
             err instanceof ApiError && err.status === 404
-              ? "Tautan undangan tidak ditemukan atau sudah kedaluwarsa."
-              : err instanceof Error ? err.message : "Tautan undangan tidak valid atau tidak dapat diakses.";
-          setState({ type: "invalid", message: msg });
+              ? "Undangan tidak tersedia: kode tidak valid, kedaluwarsa, dicabut, atau kuota sudah habis. Minta tautan baru kepada pengundang."
+              : err instanceof ApiError ? err.message : "Tautan undangan tidak valid atau tidak dapat diakses.";
+          setState({ type: "invalid", message: msg, retryable: !(err instanceof ApiError) || err.status === 0 || err.status >= 500 || err.status === 429 });
           return;
         }
 
@@ -150,8 +152,14 @@ export default function InviteCard({ code }: { code: string }) {
               avatarUrl: meData.profile?.avatar_url || undefined,
             };
           }
-        } catch {
-          currentUser = null;
+        } catch (err: unknown) {
+          if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+            currentUser = null;
+          } else {
+            if (!active) return;
+            setState({ type: "invalid", message: err instanceof ApiError ? err.message : "Undangan belum dapat dimuat. Coba lagi sebentar.", retryable: !(err instanceof ApiError) || err.status === 0 || err.status >= 500 || err.status === 429 });
+            return;
+          }
         }
 
         if (!active) return;
@@ -169,8 +177,10 @@ export default function InviteCard({ code }: { code: string }) {
           if (Array.isArray(userWorkspaces)) {
             isMember = userWorkspaces.some((w) => w.id === preview.workspace_id);
           }
-        } catch {
-          isMember = false;
+        } catch (err: unknown) {
+          if (!active) return;
+          setState({ type: "invalid", message: err instanceof ApiError ? err.message : "Undangan belum dapat dimuat. Coba lagi sebentar.", retryable: !(err instanceof ApiError) || err.status === 0 || err.status >= 500 || err.status === 429 });
+          return;
         }
 
         if (!active) return;
@@ -180,11 +190,12 @@ export default function InviteCard({ code }: { code: string }) {
         } else {
           setState({ type: "non_member", preview, user: currentUser });
         }
-      } catch (fatal: unknown) {
+      } catch {
         if (!active) return;
         setState({
           type: "invalid",
-          message: fatal instanceof Error ? fatal.message : "Terjadi kesalahan saat memeriksa undangan.",
+          message: "Undangan belum dapat dimuat. Coba lagi sebentar.",
+          retryable: true,
         });
       }
     }
@@ -194,7 +205,7 @@ export default function InviteCard({ code }: { code: string }) {
     return () => {
       active = false;
     };
-  }, [code]);
+  }, [code, retryCount]);
 
   // Handle invitation acceptance (State E)
   const handleAccept = useCallback(async () => {
@@ -214,8 +225,16 @@ export default function InviteCard({ code }: { code: string }) {
       }, 500);
     } catch (err: unknown) {
       setIsAccepting(false);
+      if (err instanceof ApiError && err.status === 404) {
+        setState({ type: "invalid", message: "Undangan tidak tersedia: kode tidak valid, kedaluwarsa, dicabut, atau kuota sudah habis. Minta tautan baru kepada pengundang." });
+        return;
+      }
+      if (err instanceof ApiError && err.status === 401) {
+        router.push(`/login?redirect=${encodeURIComponent(`/invite/${code}`)}`);
+        return;
+      }
       setAcceptError(
-        err instanceof Error ? err.message : "Gagal bergabung ke ruang kerja. Silakan coba kembali."
+        err instanceof ApiError ? err.message : "Belum bisa bergabung ke ruang kerja. Coba lagi sebentar."
       );
     }
   }, [code, state, isAccepting, isSuccess, router]);
@@ -240,7 +259,8 @@ export default function InviteCard({ code }: { code: string }) {
   }, [state.type, palette.glow]);
 
   return (
-    <main className="workspace-invite-page">
+    <main className="workspace-invite-page" aria-busy={state.type === "loading" || isAccepting}>
+      {state.type === "loading" && <span role="status" className="sr-only">Memuat undangan…</span>}
       <Link href="/" className="workspace-invite-brand"><span>✳</span> relay.</Link>
       {/* Ambient background glows */}
       <div
@@ -306,7 +326,7 @@ export default function InviteCard({ code }: { code: string }) {
               </div>
 
               <h2 className="text-lg sm:text-xl font-bold tracking-tight text-white px-2">
-                Undangan Tidak Valid atau Sudah Kedaluwarsa
+                {state.retryable ? "Undangan belum bisa dimuat" : "Undangan tidak tersedia"}
               </h2>
 
               <p className="text-xs sm:text-sm text-zinc-400 mt-2.5 max-w-[320px] leading-relaxed">
@@ -316,6 +336,16 @@ export default function InviteCard({ code }: { code: string }) {
             </div>
 
             <div className="mt-6 pt-2">
+              {state.retryable && (
+                <button
+                  type="button"
+                  onClick={() => { setState({ type: "loading" }); setRetryCount((count) => count + 1); }}
+                  className="w-full h-11 mb-2 rounded-xl bg-[#385642] hover:bg-[#466c51] active:scale-[0.98] text-white font-semibold text-sm transition-all duration-150 flex items-center justify-center gap-2"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                  <span>Coba lagi</span>
+                </button>
+              )}
               <Link
                 href="/"
                 className="w-full h-11 rounded-xl bg-zinc-800/90 hover:bg-zinc-700/90 active:scale-[0.98] text-white font-medium text-sm transition-all duration-150 flex items-center justify-center gap-2 border border-white/[0.08] shadow-lg shadow-black/20"

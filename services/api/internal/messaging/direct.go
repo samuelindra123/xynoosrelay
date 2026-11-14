@@ -20,8 +20,11 @@ import (
 
 func (h *Handler) DirectRoutes() chi.Router {
 	r := chi.NewRouter()
+	h.registerMessageActions(r, "conversationID")
 	r.Get("/", h.listDirect)
 	r.Post("/direct", h.openDirect)
+	r.Get("/{conversationID}/read", h.directRead)
+	r.Post("/{conversationID}/read", h.directRead)
 	r.Get("/{conversationID}/messages", h.listDirectMessages)
 	r.Post("/{conversationID}/messages", h.sendDirectMessage)
 	return r
@@ -170,7 +173,12 @@ func (h *Handler) listDirectMessages(w http.ResponseWriter, r *http.Request) {
 		response.RenderError(w, r, err)
 		return
 	}
-	rows, err := h.pool.Query(r.Context(), `SELECT m.id,m.sequence,m.author_id,COALESCE(NULLIF(p.display_name,''),u.username,'Pengguna'),COALESCE(u.username,''),m.text,m.created_at FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 AND cm.left_at IS NULL JOIN users u ON u.id=m.author_id LEFT JOIN profiles p ON p.user_id=u.id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL ORDER BY m.sequence DESC LIMIT 100`, id, actor)
+	before, limit, err := historyPage(r)
+	if err != nil {
+		response.RenderError(w, r, err)
+		return
+	}
+	rows, err := h.pool.Query(r.Context(), `SELECT m.id,m.sequence,m.author_id,COALESCE(NULLIF(p.display_name,''),u.username,'Pengguna'),COALESCE(u.username,''),m.text,m.created_at,m.revision FROM messages m JOIN conversation_members cm ON cm.conversation_id=m.conversation_id AND cm.user_id=$2 AND cm.left_at IS NULL JOIN users u ON u.id=m.author_id LEFT JOIN profiles p ON p.user_id=u.id WHERE m.conversation_id=$1 AND m.deleted_at IS NULL AND ($3::bigint = 0 OR m.sequence < $3) ORDER BY m.sequence DESC LIMIT $4`, id, actor, before, limit)
 	if err != nil {
 		response.RenderError(w, r, response.NewInternalError(err))
 		return
@@ -179,7 +187,7 @@ func (h *Handler) listDirectMessages(w http.ResponseWriter, r *http.Request) {
 	items := make([]Message, 0)
 	for rows.Next() {
 		var m Message
-		if err = rows.Scan(&m.ID, &m.Sequence, &m.AuthorID, &m.Author, &m.Username, &m.Text, &m.CreatedAt); err != nil {
+		if err = rows.Scan(&m.ID, &m.Sequence, &m.AuthorID, &m.Author, &m.Username, &m.Text, &m.CreatedAt, &m.Revision); err != nil {
 			response.RenderError(w, r, response.NewInternalError(err))
 			return
 		}

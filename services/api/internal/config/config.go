@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -56,7 +57,7 @@ type Config struct {
 	SMTPPass               string
 }
 
-// loadDotEnv attempts to read key-value pairs from .env files if they exist, without overwriting existing env vars.
+// loadDotEnv reads env files in precedence order, keeping values already set by the process or an earlier file.
 func loadDotEnv(filenames ...string) {
 	for _, fn := range filenames {
 		file, err := os.Open(fn)
@@ -92,7 +93,6 @@ func loadDotEnv(filenames ...string) {
 			}
 		}
 		_ = file.Close()
-		break // Stop after successfully loading the first found .env
 	}
 }
 
@@ -172,12 +172,21 @@ func LoadFromLookup(lookup func(string) (string, bool)) (*Config, error) {
 				internalAPIKeys = append(internalAPIKeys, k)
 			}
 		}
-	} else if appEnv == EnvDevelopment || appEnv == EnvTest {
-		internalAPIKeys = []string{"dev-internal-secret-key-do-not-use-in-prod"}
 	}
 
-	storageProvider := strings.ToLower(getEnv("STORAGE_PROVIDER", "local"))
+	storageProvider := strings.ToLower(getEnv("STORAGE_PROVIDER", ""))
+	if storageProvider == "" {
+		if getEnv("AWS_ENDPOINT_URL_S3", "") != "" {
+			storageProvider = "neon"
+		} else {
+			storageProvider = "local"
+		}
+	}
 	storageLocalDir := getEnv("STORAGE_LOCAL_DIR", "uploads")
+	storageBucket := getEnv("STORAGE_BUCKET", "")
+	if storageProvider == "neon" && storageBucket == "" {
+		storageBucket = "uploads"
+	}
 
 	cfg := &Config{
 		AppEnv:                 appEnv,
@@ -186,7 +195,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (*Config, error) {
 		FrontendURL:            frontendURL,
 		WebOrigins:             webOrigins,
 		DatabaseURL:            getEnv("DATABASE_URL", ""),
-		DatabaseDirectURL:      getEnv("DATABASE_DIRECT_URL", ""),
+		DatabaseDirectURL:      getEnv("DATABASE_DIRECT_URL", getEnv("DATABASE_URL_UNPOOLED", "")),
 		SessionHashKey:         getEnv("SESSION_HASH_KEY", ""),
 		OTPHMACKeys:            getEnv("OTP_HMAC_KEYS", ""),
 		GoogleClientID:         getEnv("GOOGLE_CLIENT_ID", ""),
@@ -195,11 +204,11 @@ func LoadFromLookup(lookup func(string) (string, bool)) (*Config, error) {
 		InternalAPIKeys:        internalAPIKeys,
 		StorageProvider:        storageProvider,
 		StorageLocalDir:        storageLocalDir,
-		StorageBucket:          getEnv("STORAGE_BUCKET", ""),
-		StorageEndpoint:        getEnv("STORAGE_ENDPOINT", ""),
-		StorageRegion:          getEnv("STORAGE_REGION", "auto"),
-		StorageAccessKeyID:     getEnv("STORAGE_ACCESS_KEY_ID", ""),
-		StorageSecretAccessKey: getEnv("STORAGE_SECRET_ACCESS_KEY", ""),
+		StorageBucket:          storageBucket,
+		StorageEndpoint:        getEnv("STORAGE_ENDPOINT", getEnv("AWS_ENDPOINT_URL_S3", "")),
+		StorageRegion:          getEnv("STORAGE_REGION", getEnv("AWS_REGION", "auto")),
+		StorageAccessKeyID:     getEnv("STORAGE_ACCESS_KEY_ID", getEnv("AWS_ACCESS_KEY_ID", "")),
+		StorageSecretAccessKey: getEnv("STORAGE_SECRET_ACCESS_KEY", getEnv("AWS_SECRET_ACCESS_KEY", "")),
 		StoragePublicBaseURL:   getEnv("STORAGE_PUBLIC_BASE_URL", apiBaseURL+"/v1/media/content"),
 		DBMaxConns:             dbMaxConns,
 		DBMinConns:             dbMinConns,
@@ -209,7 +218,7 @@ func LoadFromLookup(lookup func(string) (string, bool)) (*Config, error) {
 		NeonRealtimeURL:        getEnv("NEON_REALTIME_URL", ""),
 		NeonRealtimeSecret:     getEnv("NEON_REALTIME_SECRET", ""),
 		ResendAPIKey:           getEnv("RESEND_API_KEY", ""),
-		EmailFrom:              getEnv("RESEND_FROM_EMAIL", getEnv("EMAIL_FROM", "XYNOSS Relay <auth@xynoss.app>")),
+		EmailFrom:              getEnv("RESEND_FROM_EMAIL", getEnv("EMAIL_FROM", "")),
 		SMTPHost:               getEnv("SMTP_HOST", ""),
 		SMTPPort:               getEnv("SMTP_PORT", "587"),
 		SMTPUser:               getEnv("SMTP_USER", ""),
@@ -235,7 +244,42 @@ func (c *Config) HasGoogleOAuth() bool {
 
 // validate ensures mandatory variables are set for staging and production.
 func (c *Config) validate() error {
+	switch c.StorageProvider {
+	case "local", "s3", "r2", "neon":
+	default:
+		return errors.New("STORAGE_PROVIDER must be one of local, s3, r2, or neon")
+	}
+	if c.StorageProvider == "s3" || c.StorageProvider == "r2" || c.StorageProvider == "neon" {
+		if c.StorageBucket == "" || c.StorageAccessKeyID == "" || c.StorageSecretAccessKey == "" {
+			return errors.New("remote storage requires STORAGE_BUCKET, STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY")
+		}
+	}
+	if c.StorageProvider == "neon" {
+		if c.StorageEndpoint == "" {
+			return errors.New("Neon Object Storage requires STORAGE_ENDPOINT")
+		}
+		if c.StorageRegion == "" || c.StorageRegion == "auto" {
+			return errors.New("Neon Object Storage requires its explicit STORAGE_REGION")
+		}
+	}
 	if c.AppEnv == EnvProduction || c.AppEnv == EnvStaging {
+		if err := requireHTTPSURL("API_BASE_URL", c.APIBaseURL, false); err != nil {
+			return err
+		}
+		if err := requireHTTPSURL("FRONTEND_URL", c.FrontendURL, false); err != nil {
+			return err
+		}
+		if err := requireHTTPSURL("GOOGLE_REDIRECT_URI", c.GoogleRedirectURI, true); err != nil {
+			return err
+		}
+		if len(c.WebOrigins) == 0 {
+			return errors.New("WEB_ORIGINS must include the production frontend origin")
+		}
+		for _, origin := range c.WebOrigins {
+			if err := requireHTTPSURL("WEB_ORIGINS", origin, false); err != nil {
+				return err
+			}
+		}
 		var missing []string
 		if c.DatabaseURL == "" {
 			missing = append(missing, "DATABASE_URL")
@@ -246,9 +290,29 @@ func (c *Config) validate() error {
 		if c.OTPHMACKeys == "" {
 			missing = append(missing, "OTP_HMAC_KEYS")
 		}
+		if c.StorageProvider != "neon" {
+			missing = append(missing, "STORAGE_PROVIDER=neon")
+		}
+		if !c.HasEmailProvider() {
+			missing = append(missing, "RESEND_API_KEY (or SMTP_HOST)")
+		}
+		if c.HasEmailProvider() && c.EmailFrom == "" {
+			missing = append(missing, "RESEND_FROM_EMAIL (or EMAIL_FROM)")
+		}
 		if len(missing) > 0 {
 			return errors.New("missing required environment variables in " + c.AppEnv + ": " + strings.Join(missing, ", "))
 		}
+	}
+	return nil
+}
+
+func requireHTTPSURL(name, raw string, allowPath bool) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || strings.Contains(u.Host, "*") || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%s must be an absolute HTTPS URL without credentials, wildcard host, query, or fragment", name)
+	}
+	if !allowPath && u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("%s must be an origin without a path", name)
 	}
 	return nil
 }

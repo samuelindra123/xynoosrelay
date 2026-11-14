@@ -31,6 +31,7 @@ type Channel struct {
 	WorkspaceID string    `json:"workspace_id"`
 	Slug        string    `json:"slug"`
 	Name        string    `json:"name"`
+	Visibility  string    `json:"visibility"`
 	Position    int       `json:"position"`
 	CreatedAt   time.Time `json:"created_at"`
 }

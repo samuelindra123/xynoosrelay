@@ -54,11 +54,14 @@ type CurrentUserView struct {
 
 // UserSearchResult represents an item in the user search / directory result.
 type UserSearchResult struct {
-	ID           string  `json:"id"`
-	DisplayName  string  `json:"display_name"`
-	Username     string  `json:"username"`
-	AvatarURL    *string `json:"avatar_url,omitempty"`
-	Bio          string  `json:"bio"`
-	Availability string  `json:"availability"`
-	CustomStatus *string `json:"custom_status,omitempty"`
+	ID            string  `json:"id"`
+	DisplayName   string  `json:"display_name"`
+	Username      string  `json:"username"`
+	AvatarURL     *string `json:"avatar_url,omitempty"`
+	BannerURL     *string `json:"banner_url,omitempty"`
+	Bio           string  `json:"bio"`
+	Availability  string  `json:"availability"`
+	CustomStatus  *string `json:"custom_status,omitempty"`
+	AvatarMediaID *string `json:"-"`
+	BannerMediaID *string `json:"-"`
 }

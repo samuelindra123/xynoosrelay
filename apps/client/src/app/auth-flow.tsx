@@ -107,7 +107,7 @@ export function AuthFlow() {
       if (oauthErr) {
         // OAuth returns the failure through the browser's redirect URL.
         // eslint-disable-next-line react-hooks/set-state-in-effect
-        setError(oauthErr === "account_not_linked" ? "Email ini sudah digunakan. Masuk dengan metode sebelumnya untuk mengelola akun." : oauthErr === "access_denied" ? "Kamu membatalkan proses masuk dengan Google." : "Belum bisa masuk dengan Google. Coba lagi atau gunakan email.");
+        setError(oauthErr === "account_not_linked" ? "Email ini sudah terdaftar dengan metode masuk lain. Masuk menggunakan metode sebelumnya; penghubungan akun Google belum tersedia." : oauthErr === "access_denied" ? "Kamu membatalkan proses masuk dengan Google." : "Belum bisa masuk dengan Google. Coba lagi atau gunakan email.");
       }
     }
   }, []);
@@ -116,7 +116,7 @@ export function AuthFlow() {
     e.preventDefault();
     const cleanEmail = input.trim().toLowerCase();
     if (cleanEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-      setError("Masukkan alamat email yang valid."); return;
+      setError("Sepertinya alamat email belum tepat. Periksa lagi, ya."); return;
     }
     setError(""); setBusy(true);
     try {
@@ -130,7 +130,7 @@ export function AuthFlow() {
       setOtp(""); setCooldown(60);
       router.push("/verify-email");
     } catch {
-      setError("Kode belum dapat dikirim. Periksa alamat email dan coba lagi.");
+      setError("Kami belum bisa mengirim kode sekarang. Periksa alamat emailmu atau coba lagi sebentar.");
     } finally { setBusy(false); }
   }
 
@@ -138,12 +138,12 @@ export function AuthFlow() {
     e.preventDefault();
     const cleanOtp = otp.trim();
     const activeEmail = email || sessionStorage.getItem("xynoss_email") || "";
-    if (!/^\d{6}$/.test(cleanOtp)) { setError("Masukkan 6 digit kode verifikasi."); return; }
-    if (!activeEmail) { setError("Masukkan alamat email kembali untuk meminta kode."); return; }
+    if (!/^\d{6}$/.test(cleanOtp)) { setError("Masukkan 6 angka dari kode yang kami kirim."); return; }
+    if (!activeEmail) { setError("Masukkan emailmu lagi agar kami bisa mengirim kode baru."); return; }
     setError(""); setBusy(true);
     try {
       const challenge = challengeId || sessionStorage.getItem("xynoss_challenge_id");
-      if (!challenge) { setError("Minta kode baru untuk melanjutkan."); return; }
+      if (!challenge) { setError("Minta kode baru dulu, lalu coba lagi."); return; }
       const result = await api.auth.verifyOtp(challenge, cleanOtp);
       sessionStorage.removeItem("xynoss_email");
       sessionStorage.removeItem("xynoss_challenge_id");
@@ -156,14 +156,14 @@ export function AuthFlow() {
         router.push(destination);
       }
     } catch {
-      setError("Belum bisa menyelesaikan proses masuk. Periksa koneksi lalu coba lagi.");
+      setError("Kami belum bisa memeriksa kode sekarang. Coba lagi sebentar, ya.");
     } finally { setBusy(false); }
   }
 
   async function resendOtp() {
     if (busy || cooldown > 0) return;
     const activeEmail = email || sessionStorage.getItem("xynoss_email") || "";
-    if (!activeEmail) { setError("Masukkan alamat email kembali untuk meminta kode."); return; }
+    if (!activeEmail) { setError("Masukkan emailmu lagi agar kami bisa mengirim kode baru."); return; }
     setError(""); setNotice(""); setBusy(true);
     try {
       const result = await api.auth.requestOtp(activeEmail);
@@ -172,13 +172,13 @@ export function AuthFlow() {
       sessionStorage.setItem("xynoss_challenge_id", result.challenge_id);
       setOtp(""); setCooldown(60);
       setNotice("Kode baru telah diminta. Periksa kotak masuk emailmu.");
-    } catch { setError("Kode belum dapat dikirim ulang. Tunggu sebentar lalu coba lagi."); }
+    } catch { setError("Kode baru belum terkirim. Tunggu sebentar lalu coba lagi."); }
     finally { setBusy(false); }
   }
   async function submitName(e: FormEvent) {
     e.preventDefault();
     const cleanName = name.trim();
-    if (cleanName.length < 2) { setError("Nama tampilan minimal 2 karakter."); return; }
+    if (cleanName.length < 2) { setError("Nama tampilan perlu sedikitnya 2 karakter."); return; }
     setError(""); setBusy(true);
     try {
       await api.user.completeOnboarding({ display_name: cleanName });
@@ -186,17 +186,23 @@ export function AuthFlow() {
       const destination = safeAuthRedirect(sessionStorage.getItem("xynoss_redirect"));
       sessionStorage.removeItem("xynoss_redirect");
       router.push(destination);
-    } catch { setError("Profil belum dapat disimpan. Periksa koneksi dan coba lagi."); }
+    } catch { setError("Nama belum berhasil disimpan. Coba lagi sebentar."); }
     finally { setBusy(false); }
   }
 
   async function google() {
     setError(""); setBusy(true);
     try {
+      const availability = await api.auth.checkGoogleConfigured();
+      if (!availability.configured) {
+        setError(availability.error || "Masuk dengan Google belum tersedia saat ini. Coba lagi atau gunakan email.");
+        return;
+      }
       const destination = safeAuthRedirect(sessionStorage.getItem("xynoss_redirect"));
       window.location.assign(api.auth.getGoogleStartUrl(destination));
     } catch {
-      setError("Belum bisa masuk dengan Google. Coba lagi atau gunakan email.");
+      setError("Kami belum bisa memulai masuk dengan Google. Coba lagi atau gunakan email.");
+    } finally {
       setBusy(false);
     }
   }

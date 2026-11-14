@@ -1,144 +1,68 @@
-# XYNOSS Relay — Backend Service (`services/api`)
+# XYNOSS Relay API
 
-Backend API resmi untuk **XYNOSS Relay**: *Messaging without the weight. Less app. More conversation.*
+Go HTTP API for authentication, profiles, sessions, media, direct messages, workspaces, channels, invitations, and access control.
 
-Dibangun menggunakan Go, Chi HTTP router, pgx/v5 connection pool, goose migrations, dan sqlc query integration. Backend ini dirancang sebagai modular monolith yang siap dideploy ke Vercel Functions maupun containerized environment (Docker/Kubernetes).
+## Runtime
 
----
+- Go version declared by `go.mod`: 1.27.3 or newer.
+- Chi router, pgx PostgreSQL pool, Neon private object storage, and Goose SQL migrations.
+- Local server entry point: `cmd/server`.
+- Vercel Go function entry point: `api/index.go`, configured by `vercel.json`.
 
-## 1. Struktur Direktori
+## Local setup
 
-```text
-services/api/
-├── api/
-│   └── index.go             # Entrypoint Vercel Go Serverless Function (Handler)
-├── bin/
-│   └── server.exe           # Binary executable hasil kompilasi lokal
-├── cmd/
-│   └── server/
-│       └── main.go          # Standalone HTTP server runner (local dev & container)
-├── internal/
-│   ├── config/              # Validasi konfigurasi environment & fail-fast
-│   ├── database/            # Neon-compatible pgxpool connection manager & health probe
-│   │   └── queries/         # sqlc queries source (queries.sql)
-│   ├── health/              # Liveness, readiness, and status HTTP handlers
-│   ├── logger/              # Structured JSON logging (slog) & redaksi data sensitif
-│   ├── middleware/          # RequestID, CORS, SecurityHeaders, Timeout, Recoverer, Logger
-│   ├── response/            # Standardized Success & Error envelopes (docs/05-api.md)
-│   └── server/              # Chi router assembly & route mounting
-├── migrations/
-│   ├── 00001_initial_schema.sql  # Skema tabel database PostgreSQL lengkap (goose)
-│   └── migrate.go           # Programmatic migration runner
-├── openapi/
-│   └── openapi.yaml         # Kontrak OpenAPI 3.1 REST API
-├── .env.example             # Referensi variabel environment tanpa secret
-├── go.mod                   # Deklarasi Go module dan dependencies
-├── go.sum                   # Checksum cryptographic Go dependencies
-├── sqlc.yaml                # Konfigurasi type-safe code generator sqlc
-├── vercel.json              # Konfigurasi routing rewrite serverless Vercel
-└── README.md                # Dokumentasi backend ini
-```
-
----
-
-## 2. Standar Respons & Error Envelope
-
-Sesuai spesifikasi `docs/05-api.md`:
-
-### Format Respons Sukses (HTTP 2xx)
-```json
-{
-  "data": {
-    "status": "ok"
-  },
-  "meta": {
-    "next_cursor": "ey...",
-    "has_more": false
-  },
-  "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-}
-```
-
-### Format Respons Error (HTTP 4xx / 5xx)
-```json
-{
-  "error": {
-    "code": "VALIDATION_ERROR",
-    "message": "validation failed for one or more fields",
-    "details": [
-      { "field": "email", "code": "INVALID_FORMAT" }
-    ],
-    "request_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-  }
-}
-```
-
-Daftar error code standar:
-- `MALFORMED_REQUEST` (400)
-- `UNAUTHENTICATED` (401)
-- `FORBIDDEN` (403)
-- `NOT_FOUND` (404)
-- `CONFLICT` (409)
-- `CURSOR_EXPIRED` (410)
-- `REVISION_MISMATCH` (412)
-- `PAYLOAD_TOO_LARGE` (413)
-- `VALIDATION_ERROR` (422)
-- `RATE_LIMITED` (429)
-- `INTERNAL_ERROR` (500)
-- `SERVICE_UNAVAILABLE` (503)
-
----
-
-## 3. Prasyarat & Menjalankan Secara Lokal
-
-### Prasyarat
-- Go 1.23+ (Terpasang Go 1.27.3 di `C:\Users\Admin\go-sdk\go\bin`)
-- PostgreSQL (Opsional untuk testing foundation; Neon PostgreSQL untuk staging/prod)
-
-### Menjalankan Server Lokal
 ```powershell
-cd services/api
+Copy-Item .env.example .env
+# Set DATABASE_URL for persistent API features.
 go run ./cmd/server
 ```
-Server akan mendengarkan pada `http://localhost:8080`.
 
-### Verifikasi Endpoint
+The local template uses filesystem media storage and local HTTP origins. To use account, messaging, workspace, or media persistence, configure a development PostgreSQL/Neon database and run:
+
 ```powershell
-# 1. Liveness Probe
-curl.exe http://localhost:8080/health/live
-
-# 2. Readiness Probe (Dependencies Check)
-curl.exe http://localhost:8080/health/ready
-
-# 3. Service Status
-curl.exe http://localhost:8080/v1/health
+go run ./cmd/migrate
 ```
 
----
+The migration runner uses the direct/unpooled database URL when configured. Keep the pooled `DATABASE_URL` for the runtime server.
 
-## 4. Pengujian & Verifikasi Kualitas
+## Environment
 
-Semua unit test berjalan secara terisolasi tanpa membutuhkan live database external:
+| Variable group | Purpose |
+| --- | --- |
+| `APP_ENV`, `PORT`, `API_BASE_URL` | Runtime mode, listener, and public API origin |
+| `FRONTEND_URL`, `WEB_ORIGINS` | OAuth redirects and explicit credentialed CORS origins |
+| `DATABASE_URL`, `DATABASE_DIRECT_URL` | Runtime pool and migration connection |
+| `SESSION_HASH_KEY`, `OTP_HMAC_KEYS` | Session verification and versioned OTP HMAC secrets |
+| `GOOGLE_CLIENT_*`, `GOOGLE_REDIRECT_URI` | Optional Google OAuth |
+| `RESEND_*` or `SMTP_*` | Transactional email for email-code sign-in |
+| `STORAGE_*`, `AWS_*` | Local or remote object storage. Neon production storage requires endpoint, region, bucket, and credentials. |
+| `INTERNAL_API_KEYS` | Optional server-to-server credentials; never expose to the browser |
+
+Copy `services/api/.env.production.example` as a checklist only. Replace every example hostname and configure actual credentials in the deployment provider's secret manager. The repository's local `.env` is ignored and must remain separate from production secrets. Production/staging startup requires HTTPS API/frontend origins, matching explicit CORS origins, PostgreSQL, Neon storage, session and OTP keys, and an email provider.
+
+## Browser media delivery
+
+Remote object storage is private. Profile media URLs use `GET /v1/media/profile/{media_id}`; the endpoint returns an image only when its finalized media ID is currently attached as an avatar or banner. It never returns storage credentials or makes pending/unattached uploads public. Other media management routes remain authenticated.
+
+## Health checks
+
+- `GET /health/live` — process liveness.
+- `GET /health/ready` — database readiness.
+- `GET /v1/health` — API status.
+
+Errors use a consistent JSON envelope with code, message, details, and request ID. Production logs include request metadata (method, path, status, duration, remote address, and user agent); request bodies and credentials are not logged by the HTTP request logger.
+
+## Checks
+
+Run from `services/api`:
 
 ```powershell
-# Format code
-go fmt ./...
-
-# Static analysis
+Get-ChildItem -Recurse -Filter *.go | ForEach-Object { gofmt -w $_.FullName }
 go vet ./...
-
-# Unit test suite
-go test -v ./...
-
-# Build binary
-go build -v -o bin/server.exe ./cmd/server
+go test ./...
+go build ./...
 ```
 
----
+## Vercel
 
-## 5. Deployment ke Vercel Functions
-
-Struktur `api/index.go` dan `vercel.json` dirancang khusus untuk deployment serverless Vercel:
-- `api/index.go` mengekspor fungsi `Handler(w http.ResponseWriter, r *http.Request)`.
-- Router Chi, logger, dan connection pool diinisialisasi secara thread-safe pada cold start (`sync.Once`).
-- `vercel.json` melakukan rewrite seluruh request `/(.*)` ke handler serverless `/api`.
+Deploy this directory as the API project's root. Set the environment variables above in Vercel for Production, Preview, and Development as appropriate. Do not rely on the Vercel function's local filesystem for persistent uploads. A configuration error returns `503`; the function does not silently fall back to an in-memory or local-storage production server.

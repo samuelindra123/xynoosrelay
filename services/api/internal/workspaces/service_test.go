@@ -41,3 +41,10 @@ func TestResolveBaseURLOnlyUsesConfiguredFrontendURL(t *testing.T) {
 		t.Fatalf("ResolveBaseURL() = %q, want %q", got, want)
 	}
 }
+
+func TestCreateChannelRejectsUnknownVisibilityBeforeStoreAccess(t *testing.T) {
+	service := NewService(nil, "")
+	if _, err := service.CreateChannel(t.Context(), "workspace", "user", "private", "secret"); err != ErrInvalidChannelInput {
+		t.Fatalf("invalid visibility error = %v", err)
+	}
+}

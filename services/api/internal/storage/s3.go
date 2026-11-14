@@ -41,6 +41,10 @@ func NewS3Provider(cfg S3Config) (*S3Provider, error) {
 	if cfg.Endpoint == "" {
 		cfg.Endpoint = fmt.Sprintf("https://s3.%s.amazonaws.com", cfg.Region)
 	}
+	endpoint, err := url.Parse(cfg.Endpoint)
+	if err != nil || (endpoint.Scheme != "https" && endpoint.Scheme != "http") || endpoint.Host == "" || endpoint.User != nil {
+		return nil, errors.New("S3 endpoint must be an absolute HTTP or HTTPS URL")
+	}
 
 	return &S3Provider{
 		cfg:        cfg,
@@ -189,8 +193,7 @@ func (s *S3Provider) PutObject(ctx context.Context, key string, reader io.Reader
 }
 
 func (s *S3Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, string, error) {
-	targetURL := fmt.Sprintf("%s/%s/%s", s.cfg.Endpoint, s.cfg.Bucket, strings.TrimPrefix(key, "/"))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	req, err := s.newSignedRequest(ctx, http.MethodGet, key)
 	if err != nil {
 		return nil, "", err
 	}
@@ -214,8 +217,7 @@ func (s *S3Provider) GetObject(ctx context.Context, key string) (io.ReadCloser, 
 }
 
 func (s *S3Provider) DeleteObject(ctx context.Context, key string) error {
-	targetURL := fmt.Sprintf("%s/%s/%s", s.cfg.Endpoint, s.cfg.Bucket, strings.TrimPrefix(key, "/"))
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, targetURL, nil)
+	req, err := s.newSignedRequest(ctx, http.MethodDelete, key)
 	if err != nil {
 		return err
 	}
@@ -226,11 +228,47 @@ func (s *S3Provider) DeleteObject(ctx context.Context, key string) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
+	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		return fmt.Errorf("S3 DELETE returned unexpected status %d", resp.StatusCode)
 	}
 
 	return nil
+}
+
+// newSignedRequest signs empty-payload S3 requests used to read and remove private objects.
+func (s *S3Provider) newSignedRequest(ctx context.Context, method, key string) (*http.Request, error) {
+	endpointURL, err := url.Parse(s.cfg.Endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("invalid S3 endpoint URL: %w", err)
+	}
+	objectKey := strings.TrimLeft(key, "/")
+	segments := strings.Split(objectKey, "/")
+	encodedKey := make([]string, 0, len(segments))
+	for _, segment := range segments {
+		encodedKey = append(encodedKey, url.PathEscape(segment))
+	}
+	canonicalURI := "/" + url.PathEscape(s.cfg.Bucket) + "/" + strings.Join(encodedKey, "/")
+	endpointURL.Path = strings.TrimRight(endpointURL.Path, "/") + canonicalURI
+	endpointURL.RawPath = ""
+	date := time.Now().UTC()
+	dateStamp := date.Format("20060102")
+	amzDate := date.Format("20060102T150405Z")
+	payloadHash := sha256Hex(nil)
+	req, err := http.NewRequestWithContext(ctx, method, endpointURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-amz-date", amzDate)
+	req.Header.Set("x-amz-content-sha256", payloadHash)
+	signedHeaders := "host;x-amz-content-sha256;x-amz-date"
+	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n", endpointURL.Host, payloadHash, amzDate)
+	canonicalRequest := strings.Join([]string{method, canonicalURI, "", canonicalHeaders, signedHeaders, payloadHash}, "\n")
+	credentialScope := fmt.Sprintf("%s/%s/s3/aws4_request", dateStamp, s.cfg.Region)
+	stringToSign := strings.Join([]string{"AWS4-HMAC-SHA256", amzDate, credentialScope, sha256Hex([]byte(canonicalRequest))}, "\n")
+	signingKey := getSignatureKey(s.cfg.SecretAccessKey, dateStamp, s.cfg.Region, "s3")
+	signature := hex.EncodeToString(hmacSHA256(signingKey, []byte(stringToSign)))
+	req.Header.Set("Authorization", fmt.Sprintf("AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s", s.cfg.AccessKeyID, credentialScope, signedHeaders, signature))
+	return req, nil
 }
 
 func (s *S3Provider) PublicURL(key string) string {

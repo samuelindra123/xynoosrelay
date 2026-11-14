@@ -4,15 +4,19 @@ import { useCallback, useEffect, useRef, useState, useMemo, type FormEvent } fro
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import "./messenger.css";
+import { refreshHistory, prependHistory } from "./message-history";
 import { unreadCount, canMarkRead } from "./read-state";
 import { pendingChannelRequest } from "./channel-retry";
+import MediaEditor from "./media-editor";
+import SessionSettings from "./session-settings";
+import PrivateAccessSettings from "./private-access-settings";
+import { useDialogFocus } from "./use-dialog-focus";
+import { copyText } from "@/lib/clipboard";
 import {
   api,
-  type SessionEntity,
   type UserSearchResult,
   type WorkspaceDetailEntity,
   type InvitePreviewEntity,
-  type ChannelMessageEntity,
   type WorkspaceInviteEntity,
   ApiError,
 } from "@/lib/api";
@@ -31,8 +35,6 @@ import {
   X,
   ArrowUpRight,
   SendHorizontal,
-  Camera,
-  Image as ImageIcon,
   Shield,
   Crown,
   Sparkles,
@@ -49,6 +51,7 @@ import {
 // --- TYPES ---
 export type Msg = {
   id: number;
+  revision?: number;
   authorId?: string;
   author: string;
   authorUsername?: string;
@@ -144,20 +147,25 @@ function LuxuryAvatar({
     return clean.slice(0, Math.min(2, clean.length)).toUpperCase();
   }, [name]);
 
+  const normalizedStatus = status?.toLowerCase();
   const statusColor =
-    status === "online" || status === "Tersedia"
+    normalizedStatus === "online" || normalizedStatus === "tersedia"
       ? "#22c55e"
-      : status === "busy" || status === "Sibuk"
+      : normalizedStatus === "busy" || normalizedStatus === "sibuk" || normalizedStatus === "dnd"
       ? "#ef4444"
-      : status === "away" || status === "Jauh"
+      : normalizedStatus === "idle" || normalizedStatus === "away" || normalizedStatus === "jauh"
       ? "#f59e0b"
-      : undefined;
+      : normalizedStatus === "offline" ? "#94a3b8" : undefined;
 
   return (
     <div
       className={`luxury-avatar-wrap ${className}`}
       style={{ width: size, height: size }}
       onClick={onClick}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      aria-label={onClick ? `Lihat profil ${name}` : undefined}
+      onKeyDown={onClick ? event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onClick(); } } : undefined}
     >
       <div
         className="luxury-avatar"
@@ -206,24 +214,58 @@ function ProfileCard({
   onClose: () => void;
   onMessage: (user: UserProfile) => void;
 }) {
+  const [profileDetails, setProfileDetails] = useState<{ username: string; details: Partial<UserProfile> } | null>(null);
   const [copied, setCopied] = useState(false);
-  const bannerBg = user.banner ? `url(${user.banner})` : getBanner(user.username || user.name);
+  const [copyError, setCopyError] = useState("");
+  const [profileRefreshError, setProfileRefreshError] = useState("");
+  const profileRef = useRef<HTMLDivElement>(null);
+  const dismiss = useCallback(() => onClose(), [onClose]);
+  useDialogFocus(profileRef, true, dismiss);
+  useEffect(() => {
+    const username = user.username?.replace(/^@/, "").trim();
+    if (!username) return;
+    let active = true;
+    const refresh = () => api.user.searchUsers(username).then((results) => {
+      const match = results.find((result) => result.username.toLowerCase() === username.toLowerCase());
+      if (active && match) {
+        setProfileRefreshError("");
+        setProfileDetails({
+        username: user.username,
+        details: {
+          name: match.display_name || user.name,
+          username: match.username,
+          bio: match.bio ?? user.bio,
+          status: match.availability ?? user.status,
+          custom: match.custom_status ?? user.custom,
+          avatar: match.avatar_url ?? user.avatar,
+          banner: match.banner_url ?? user.banner,
+        },
+        });
+      } else if (active) setProfileRefreshError("Profil belum dapat diperbarui. Coba buka kembali nanti.");
+    }).catch(() => { if (active) setProfileRefreshError("Profil belum dapat diperbarui. Periksa koneksi lalu coba lagi."); });
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 15000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [user]);
+  const viewedUser = profileDetails?.username === user.username ? { ...user, ...profileDetails.details } : user;
+  const bannerBg = viewedUser.banner ? `url(${viewedUser.banner})` : getBanner(viewedUser.username || viewedUser.name);
 
   function copyId() {
-    navigator.clipboard?.writeText(`@${user.username}`).then(() => {
+    copyText(`@${viewedUser.username}`).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
+      setCopyError(""); setTimeout(() => setCopied(false), 2000);
+    }).catch(err => setCopyError(err.message));
   }
 
   return (
     <div className="discord-card-overlay" onClick={onClose}>
-      <div className="discord-profile-card" onClick={(e) => e.stopPropagation()}>
+      <div className="discord-profile-card" ref={profileRef} role="dialog" aria-modal="true" aria-label="Profil pengguna" tabIndex={-1} onClick={(e) => e.stopPropagation()}>
+        {copyError && <p role="alert">{copyError}</p>}
+        {profileRefreshError && <p role="status">{profileRefreshError}</p>}
         <div
           className="discord-card-banner"
           style={{
-            backgroundImage: user.banner ? `url(${user.banner})` : undefined,
-            background: !user.banner ? bannerBg : undefined,
+            backgroundImage: viewedUser.banner ? `url(${viewedUser.banner})` : bannerBg,
           }}
         >
           <button className="discord-card-close" onClick={onClose} aria-label="Tutup profil">
@@ -233,14 +275,14 @@ function ProfileCard({
         <div className="discord-card-header">
           <div className="discord-avatar-container">
             <LuxuryAvatar
-              name={user.name}
-              src={user.avatar}
+              name={viewedUser.name}
+              src={viewedUser.avatar}
               size={76}
-              status={user.status || "online"}
+              status={viewedUser.status || "online"}
             />
           </div>
           <div className="discord-badges">
-            {user.role === "Owner" ? (
+            {viewedUser.role === "Owner" ? (
               <span className="role-badge role-owner">
                 <Crown size={12} /> Owner
               </span>
@@ -256,14 +298,19 @@ function ProfileCard({
         </div>
         <div className="discord-card-content">
           <div className="discord-name-box">
-            <h3 className="discord-display-name">{user.name}</h3>
-            <span className="discord-username">@{user.username}</span>
+            <h3 className="discord-display-name">{viewedUser.name}</h3>
+            <span className="discord-username">@{viewedUser.username}</span>
           </div>
 
-          {user.custom && (
+          <div className="discord-presence-row" aria-label={`Ketersediaan: ${viewedUser.status || "online"}`}>
+            <span className={`discord-presence-dot presence-${(viewedUser.status || "online").toLowerCase()}`} />
+            <span>{({ online: "Tersedia", idle: "Sedang pergi", dnd: "Jangan ganggu", offline: "Offline" } as Record<string, string>)[(viewedUser.status || "online").toLowerCase()] || viewedUser.status}</span>
+          </div>
+
+          {viewedUser.custom && (
             <div className="discord-custom-status">
               <MessageSquare size={13} style={{ flexShrink: 0, opacity: 0.8 }} />
-              <span>{user.custom}</span>
+              <span>{viewedUser.custom}</span>
             </div>
           )}
 
@@ -272,14 +319,14 @@ function ProfileCard({
           <div>
             <div className="discord-section-title">TENTANG SAYA</div>
             <p className="discord-bio-text">
-              {user.bio || "Pengguna ini belum menambahkan catatan tentang dirinya."}
+              {viewedUser.bio || "Pengguna ini belum menambahkan catatan tentang dirinya."}
             </p>
           </div>
 
           <div className="discord-actions">
             <button
               className="discord-btn-primary"
-              onClick={() => onMessage(user)}
+              onClick={() => onMessage(viewedUser)}
             >
               <MessageSquare size={14} /> Kirim Pesan
             </button>
@@ -304,14 +351,13 @@ function ProfileCard({
 // --- MAIN MESSENGER COMPONENT ---
 export default function Messenger({ accountId }: { accountId: string }) {
   const router = useRouter();
-  const storagePrefix = `xynoss_v3_${accountId}_`;
 
   // Profile of current logged-in user
   const [profile, setProfile] = useState<UserProfile>({
     name: "Kamu",
     username: "kamu",
     bio: "",
-    status: "Tersedia",
+    status: "online",
     custom: "",
     avatar: "",
     banner: "",
@@ -321,18 +367,39 @@ export default function Messenger({ accountId }: { accountId: string }) {
   // Persistent state using storage versioning (xynoss_v2_*)
   const [spaces, setSpaces] = useState<WorkspaceDetailEntity[]>([]);
   const [dmContacts, setDmContacts] = useState<DMContact[]>([]);
-  const [, setMessages] = useState<Record<string, Msg[]>>({});
+  const [messageAvatars, setMessageAvatars] = useState<Record<string, string | null>>({});
   const [channelMessages, setChannelMessages] = useState<Record<string, Msg[]>>({});
   const [sendingChannelMessage, setSendingChannelMessage] = useState(false);
   const [channelError, setChannelError] = useState("");
+  const [messageAttempt, setMessageAttempt] = useState(0);
+  const [messageLoad, setMessageLoad] = useState<Record<string, { loading: boolean; error: string; blocked?: boolean }>>({});
+  const [pendingSends, setPendingSends] = useState<Record<string, { text: string; failed: boolean; rejected?: boolean }>>({});
+  const sendingRef = useRef(false);
+  const [messageBusy, setMessageBusy] = useState<number | null>(null);
+  const [hearts, setHearts] = useState<Record<string, boolean | undefined>>({});
+  const actionRef = useRef(false);
+  const editRevision = useRef(1);
+  const [editConflict, setEditConflict] = useState(false);
+  const [workspaceLoad, setWorkspaceLoad] = useState<{ id: string; loading: boolean; error: string; status?: number }>({ id: "", loading: false, error: "" });
+  const [workspaceAttempt, setWorkspaceAttempt] = useState(0);
+  const [spacesLoading, setSpacesLoading] = useState(true);
+  const [spacesError, setSpacesError] = useState("");
+  const [searchError, setSearchError] = useState("");
+  const [searchAttempt, setSearchAttempt] = useState(0);
+  const [dmError, setDmError] = useState("");
+  const [dmLoading, setDmLoading] = useState(true);
+  const [dmAttempt, setDmAttempt] = useState(0);
+  const [inviteListError, setInviteListError] = useState("");
   const [readCursors, setReadCursors] = useState<Record<string, number>>({});
-  const [storageReady, setStorageReady] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyEnds, setHistoryEnds] = useState<Record<string, boolean>>({});
+  const readPending = useRef<Set<string>>(new Set());
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [joiningWorkspace, setJoiningWorkspace] = useState(false);
 
   // Active navigation state
   const [space, setSpace] = useState("dm"); // "dm" or workspace id
-  const [selected, setSelected] = useState(""); // username in dm, channel slug in workspace
+  const [selected, setSelected] = useState(""); // conversation ID in dm, channel slug in workspace
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [search, setSearch] = useState("");
   const [panel, setPanel] = useState("");
@@ -363,24 +430,33 @@ export default function Messenger({ accountId }: { accountId: string }) {
   // Workspace creation & channel creation state
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [newChannelVisibility, setNewChannelVisibility] = useState<"public" | "private">("public");
+  const [privateAccessChannel, setPrivateAccessChannel] = useState("");
+
   const [creatingWs, setCreatingWs] = useState(false);
   const [notice, setNotice] = useState("");
-  const [uploadingField, setUploadingField] = useState<"avatar" | "banner" | null>(null);
-  const [realSessions, setRealSessions] = useState<SessionEntity[]>([]);
   const [mobileList, setMobileList] = useState(false);
   const [railPinned, setRailPinned] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
+  const [profileConflict, setProfileConflict] = useState(false);
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const channelMutationRef = useRef(0);
-  const bannerInputRef = useRef<HTMLInputElement>(null);
-  const avatarInputRef = useRef<HTMLInputElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
+  const [mediaPending, setMediaPending] = useState(false);
+  const closeDialog = useCallback(() => {
+    if (mediaPending) { setNotice("Selesaikan atau buang unggahan pada tab Profil sebelum menutup pengaturan."); return; }
+    setDialog("");
+  }, [mediaPending]);
+  const joinRef = useRef<HTMLDivElement>(null);
+  const closeJoin = useCallback(() => { if (!joiningWorkspace) setJoinWsOffer(null); }, [joiningWorkspace]);
+  useDialogFocus(joinRef, !!joinWsOffer, closeJoin);
+  useDialogFocus(modalRef, !!dialog, closeDialog);
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem("xynoss_app_theme");
       // Hydrate the browser-only preference after the server render.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       if (saved === "dark" || saved === "light") setTheme(saved);
       else if (window.matchMedia("(prefers-color-scheme: dark)").matches) setTheme("dark");
     } catch { /* Appearance remains usable when storage is unavailable. */ }
@@ -391,27 +467,6 @@ export default function Messenger({ accountId }: { accountId: string }) {
     try { localStorage.setItem("xynoss_app_theme", next); } catch { /* Keep the current selection for this session. */ }
   }
 
-  // Data from earlier unscoped versions is deliberately left untouched: its
-  // owner cannot be determined safely on a shared browser.
-  useEffect(() => {
-    try {
-      const savedCursors = localStorage.getItem(`${storagePrefix}server_read_cursors`);
-      if (savedCursors) {
-        // Restore the account-scoped browser cursor when its storage key changes.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setReadCursors(JSON.parse(savedCursors));
-      }
-    } catch {
-      setNotice("Beberapa preferensi tidak dapat dimuat. Periksa izin penyimpanan browser.");
-    } finally { setStorageReady(true); }
-  }, [storagePrefix]);
-
-  // Save V2 changes to localStorage
-  useEffect(() => {
-    if (!storageReady) return;
-    try { localStorage.setItem(`${storagePrefix}server_read_cursors`, JSON.stringify(readCursors)); } catch { /* Reading remains available without persistence. */ }
-  }, [readCursors, storageReady, storagePrefix]);
-
   // 2. Load Real Workspaces from Database Backend (Starts at 0 workspaces for new users)
   const refreshWorkspaces = useCallback(async () => {
     try {
@@ -419,7 +474,9 @@ export default function Messenger({ accountId }: { accountId: string }) {
       if (Array.isArray(list)) {
         setSpaces(list);
       }
-    } catch {}
+      setSpacesError("");
+    } catch (err) { setSpacesError(err instanceof Error ? err.message : "Workspace belum dapat dimuat."); }
+    finally { setSpacesLoading(false); }
   }, []);
 
   // 3. Bootstrap user session & profile
@@ -436,7 +493,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
             name: data.profile.display_name || data.user.display_name || "Kamu",
             username: data.profile.username || data.user.username || "kamu",
             bio: data.profile.bio || "",
-            status: data.profile.availability || "Tersedia",
+            status: data.profile.availability || "online",
             custom: data.profile.custom_status || "",
             avatar: data.profile.avatar_url || "",
             banner: data.profile.banner_url || "",
@@ -445,7 +502,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
         }
         refreshWorkspaces();
       } catch {
-        if (active) setIsConnected(false);
+        if (active) { setIsConnected(false); setNotice("Profil belum dapat dimuat. Buka kembali aplikasi untuk mencoba lagi."); }
       }
     }
 
@@ -466,7 +523,6 @@ export default function Messenger({ accountId }: { accountId: string }) {
 
     if (wsParam) {
       // Apply and consume an external navigation request.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSpace(wsParam);
       window.history.replaceState({}, "", window.location.pathname);
     }
@@ -477,8 +533,8 @@ export default function Messenger({ accountId }: { accountId: string }) {
         .then((prev) => {
           setJoinWsOffer(prev);
         })
-        .catch(() => {
-          setNotice("Kode undangan tidak ditemukan atau sudah kedaluwarsa.");
+        .catch(err => {
+          setNotice(err instanceof ApiError && err.status === 404 ? "Undangan tidak valid, kedaluwarsa, dicabut, atau kuotanya habis. Minta tautan baru." : err instanceof Error ? err.message : "Undangan belum dapat diperiksa. Coba lagi.");
         });
       window.history.replaceState({}, "", window.location.pathname);
     }
@@ -502,6 +558,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 username: found.username,
                 name: found.display_name || found.username,
                 avatar: found.avatar_url || "",
+                banner: found.banner_url || "",
                 status: found.availability || "online",
                 customStatus: found.custom_status || "",
                 bio: found.bio || "",
@@ -510,7 +567,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 return [newContact, ...prev.filter((c) => c.id !== found.id)];
               });
               setSpace("dm");
-              setSelected(found.username);
+              setSelected(conversation.id);
             }
           })
           .catch(() => setNotice("Percakapan dari tautan tidak dapat dibuka. Periksa koneksi dan nama pengguna."));
@@ -525,8 +582,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
       const activeWs = spaces.find((w) => w.id === space);
       if (activeWs && activeWs.channels && activeWs.channels.length > 0) {
         // Select the first channel when externally loaded workspace data arrives.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        setSelected(activeWs.channels[0].slug);
+          setSelected(activeWs.channels[0].slug);
       }
     }
   }, [space, spaces, selected]);
@@ -536,13 +592,13 @@ export default function Messenger({ accountId }: { accountId: string }) {
     let active = true;
     if (!searchQuery.trim()) {
       // Clear stale results as the query is cleared.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSearchResults([]);
       setSearching(false);
       return;
     }
     const timer = setTimeout(() => {
       setSearching(true);
+      setSearchError("");
       api.user
         .searchUsers(searchQuery)
         .then((res) => {
@@ -550,23 +606,64 @@ export default function Messenger({ accountId }: { accountId: string }) {
             setSearchResults(res.filter((u) => u.username !== profile.username));
           }
         })
-        .catch(() => { if (active) setSearchResults([]); })
+        .catch(err => { if (active) { setSearchResults([]); setSearchError(err instanceof Error ? err.message : "Pencarian gagal. Coba lagi."); } })
         .finally(() => { if (active) setSearching(false); });
     }, 280);
     return () => { active = false; clearTimeout(timer); };
-  }, [searchQuery, profile.username]);
+  }, [searchQuery, profile.username, searchAttempt]);
 
   // Active workspace & channel
-  const ws = spaces.find((x) => x.id === space);
-  const workspaceId = ws?.id;
-  const channelId = ws?.channels?.find((c) => c.slug === selected)?.id;
-  const activeDm = space === "dm" ? dmContacts.find((c) => c.username === selected) : null;
-  const key = space === "dm" ? selected : `${space}:${selected}`;
+  const workspaceReady = space !== "dm" && workspaceLoad.id === space && !workspaceLoad.loading && !workspaceLoad.error;
+  const ws = workspaceReady ? spaces.find((x) => x.id === space) : undefined;
+  const activeChannel = ws?.channels?.find((c) => c.slug === selected);
+  const channelId = activeChannel?.id;
+  const activeDm = space === "dm" ? dmContacts.find((c) => c.conversationId === selected) : null;
+  const key = space === "dm" ? `dm:${activeDm?.conversationId || "none"}` : `${space}:${selected}`;
   const list = useMemo(() => channelMessages[key] || [], [channelMessages, key]);
   const draft = drafts[key] || "";
-  const displayed = list.filter((m) =>
+  const displayed = (space !== "dm" && !workspaceReady ? [] : list).filter((m) =>
     m.text.toLowerCase().includes(search.toLowerCase())
   );
+  function messageAvatar(message: Msg) {
+    const isSelf = message.authorId ? message.authorId === accountId : message.author === profile.name;
+    if (isSelf) return profile.avatar;
+    if (message.authorId && Object.prototype.hasOwnProperty.call(messageAvatars, message.authorId)) return messageAvatars[message.authorId] || undefined;
+    return message.authorAvatar;
+  }
+  const messageAuthors = useMemo(() => {
+    const authors = new Map<string, string>();
+    for (const message of list) {
+      if (message.authorId && message.authorId !== accountId && message.authorUsername) {
+        authors.set(message.authorId, message.authorUsername);
+      }
+    }
+    return [...authors].map(([id, username]) => ({ id, username }));
+  }, [list, accountId]);
+  const messageAuthorsKey = messageAuthors.map(author => `${author.id}:${author.username}`).join("|");
+
+  useEffect(() => {
+    if (!messageAuthors.length) return;
+    let active = true;
+    const refreshMessageAvatars = async () => {
+      const results = await Promise.allSettled(messageAuthors.map(async author => {
+        const users = await api.user.searchUsers(author.username);
+        const user = users.find(result => result.id === author.id);
+        return user ? { id: author.id, avatar: user.avatar_url || null } : null;
+      }));
+      if (!active) return;
+      const updates = results.flatMap(result => result.status === "fulfilled" && result.value ? [result.value] : []);
+      if (updates.length) setMessageAvatars(previous => {
+        const next = { ...previous };
+        for (const update of updates) next[update.id] = update.avatar;
+        return next;
+      });
+    };
+    void refreshMessageAvatars();
+    const timer = window.setInterval(() => void refreshMessageAvatars(), 15000);
+    return () => { active = false; window.clearInterval(timer); };
+  // Refresh avatars when the authors in this conversation change.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messageAuthorsKey]);
 
   useEffect(() => {
     let active = true;
@@ -581,82 +678,141 @@ export default function Messenger({ accountId }: { accountId: string }) {
           const old = previous.find((contact) => contact.id === item.user_id);
           return { ...old, id: item.user_id, conversationId: item.id, username: item.username, name: item.display_name };
         }));
-      } catch { if (active) setNotice("Daftar percakapan tidak dapat diperbarui."); }
-      finally { fetching = false; }
+        setDmError("");
+      } catch (err) { if (active) setDmError(err instanceof Error ? err.message : "Daftar percakapan belum bisa dimuat."); }
+      finally { fetching = false; if (active) setDmLoading(false); }
     };
     void refresh();
     const timer = window.setInterval(refresh, 15000);
     return () => { active = false; window.clearInterval(timer); };
-  }, []);
+  }, [dmAttempt]);
+
+  const dmContactIds = dmContacts.map((contact) => contact.id).join(",");
+  useEffect(() => {
+    if (!dmContacts.length) return;
+    let active = true;
+    const refreshPresence = async () => {
+      const results = await Promise.allSettled(dmContacts.map(async (contact) => {
+        if (!contact.username) return null;
+        const users = await api.user.searchUsers(contact.username);
+        return users.find((user) => user.id === contact.id) || null;
+      }));
+      if (!active) return;
+      const presenceById = new Map<string, UserSearchResult>();
+      results.forEach((result) => {
+        if (result.status === "fulfilled" && result.value) presenceById.set(result.value.id, result.value);
+      });
+      if (presenceById.size) setDmContacts((previous) => previous.map((contact) => {
+        const user = presenceById.get(contact.id);
+        return user ? {
+          ...contact,
+          status: user.availability || undefined,
+          customStatus: user.custom_status || "",
+          bio: user.bio || "",
+          avatar: user.avatar_url || contact.avatar,
+          banner: user.banner_url || contact.banner,
+        } : contact;
+      }));
+    };
+    void refreshPresence();
+    const timer = window.setInterval(() => void refreshPresence(), 15000);
+    return () => { active = false; window.clearInterval(timer); };
+  // Refresh when the set of direct conversation participants changes.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dmContactIds]);
 
   useEffect(() => {
-    if (space !== "dm" || !activeDm?.conversationId) return;
-    const id = activeDm.conversationId;
+    if (space === "dm") return;
+    let active = true;
+    Promise.resolve().then(async () => {
+      if (!active) return;
+      setWorkspaceLoad({ id: space, loading: true, error: "" });
+      try {
+        const detail = await api.workspaces.get(space);
+        if (active) {
+          setSpaces(previous => [...previous.filter(item => item.id !== detail.id), detail]);
+          setWorkspaceLoad({ id: space, loading: false, error: "" });
+          setSelected(current => detail.channels?.some(channel => channel.slug === current) ? current : detail.channels?.[0]?.slug || "");
+        }
+      } catch (err) {
+        if (!active) return;
+        const status = err instanceof ApiError ? err.status : 0;
+        if ([401, 403, 404].includes(status)) {
+          setSpaces(previous => previous.filter(item => item.id !== space));
+          setChannelMessages(previous => Object.fromEntries(Object.entries(previous).filter(([id]) => !id.startsWith(`${space}:`))));
+        }
+        setWorkspaceLoad({ id: space, loading: false, error: status === 403 ? "Kamu bukan anggota workspace ini. Gunakan undangan untuk bergabung." : status === 404 ? "Workspace tidak ditemukan atau tidak tersedia." : err instanceof Error ? err.message : "Workspace belum dapat dimuat.", status });
+      }
+    });
+    return () => { active = false; };
+  }, [space, workspaceAttempt]);
+
+  useEffect(() => {
+    const destination = channelId || activeDm?.conversationId;
+    if (!destination) return;
     let active = true;
     let fetching = false;
     const refresh = async () => {
-      if (fetching || document.visibilityState !== "visible") return;
+      if (fetching || document.visibilityState !== "visible" || actionRef.current) return;
       fetching = true;
       const revision = channelMutationRef.current;
       try {
-        const data = await api.conversations.messages(id);
-        if (!active || revision !== channelMutationRef.current) return;
-        setChannelMessages((previous) => ({ ...previous, [selected]: data.map((message) => ({
-          id: message.sequence, authorId: message.author_id, author: message.author_id === accountId ? profile.name : message.author,
+        const data = channelId ? await api.channelMessages.list(destination) : await api.conversations.messages(destination);
+        if (!active || revision !== channelMutationRef.current || actionRef.current) return;
+        setChannelMessages(previous => ({ ...previous, [key]: refreshHistory(previous[key] || [], data.map(message => ({
+          id: message.sequence, revision: message.revision || 1, authorId: message.author_id,
+          author: message.author_id === accountId ? profile.name : message.author,
           authorUsername: message.username, text: message.text,
           time: new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.created_at)),
-        })) }));
-        setChannelError("");
-      } catch (error) {
-        if (active) {
-          if (error instanceof ApiError && [401,403,404].includes(error.status)) setChannelMessages((previous) => { const next = { ...previous }; delete next[selected]; return next; });
-          setChannelError("Percakapan tidak dapat dimuat. Periksa koneksi atau akses akunmu.");
-        }
+        }))) }));
+        setMessageLoad(previous => ({ ...previous, [key]: { loading: false, error: "" } }));
+        setHistoryEnds(previous => previous[key] === undefined ? { ...previous, [key]: data.length < 100 } : previous);
+      } catch (err) {
+        if (!active) return;
+        const blocked = err instanceof ApiError && [401, 403, 404].includes(err.status);
+        if (blocked) setChannelMessages(previous => ({ ...previous, [key]: [] }));
+        setMessageLoad(previous => ({ ...previous, [key]: { loading: false, blocked, error: blocked ? "Percakapan tidak tersedia atau kamu tidak lagi memiliki akses." : err instanceof Error ? err.message : "Pesan belum dapat dimuat." } }));
       } finally { fetching = false; }
     };
     void refresh();
     const timer = window.setInterval(refresh, 10000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [space, activeDm?.conversationId, selected, accountId, profile.name]);
+  }, [channelId, activeDm?.conversationId, key, accountId, profile.name, messageAttempt]);
 
+  const readDestination = channelId || activeDm?.conversationId;
+  const isWorkspace = !!ws;
   useEffect(() => {
-    if (!channelId || !workspaceId) return;
+    if (!readDestination) return;
     let active = true;
-    let fetching = false;
-    const channelKey = `${workspaceId}:${selected}`;
-    const fetchMessages = async () => {
-      if (fetching) return;
-      fetching = true;
+    const client = isWorkspace ? api.channelMessages : api.conversations;
+    void client.read(readDestination).then(state => {
+      if (active) setReadCursors(previous => ({ ...previous, [key]: Math.max(previous[key] || 0, state.last_read_sequence) }));
+    }).catch(() => { if (active) setChannelError("Tanda pesan terbaca belum bisa diperbarui. Coba lagi sebentar."); });
+    return () => { active = false; };
+  }, [readDestination, isWorkspace, key, messageAttempt]);
+
+  async function loadOlder() {
+    if (!readDestination || loadingHistory || !list.length) return;
+    const targetKey = key;
+    const before = list[0].id;
+    const body = chatBodyRef.current;
+    const height = body?.scrollHeight || 0;
+    const top = body?.scrollTop || 0;
+    setLoadingHistory(true);
+    try {
       const revision = channelMutationRef.current;
-      try {
-        const data = await api.channelMessages.list(channelId);
-        if (!active || revision !== channelMutationRef.current) return;
-        setChannelMessages((previous) => ({ ...previous, [channelKey]: data.map((message: ChannelMessageEntity) => ({
-          id: message.sequence,
-          authorId: message.author_id,
-          author: message.author_id === accountId ? profile.name : message.author,
-          authorUsername: message.username,
-          text: message.text,
-          time: new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date(message.created_at)),
-        })) }));
-        setChannelError("");
-      } catch (error) {
-        if (active) {
-          if (error instanceof ApiError && [401, 403, 404].includes(error.status)) {
-            setChannelMessages((previous) => {
-              const next = { ...previous };
-              delete next[channelKey];
-              return next;
-            });
-            setChannelError("Channel tidak tersedia atau aksesmu telah berubah.");
-          } else setChannelError("Pesan channel tidak dapat dimuat. Memeriksa koneksi kembali…");
-        }
-      } finally { fetching = false; }
-    };
-    void fetchMessages();
-    const timer = window.setInterval(fetchMessages, 10000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [channelId, workspaceId, selected, accountId, profile.name]);
+      const data = isWorkspace ? await api.channelMessages.list(readDestination, before) : await api.conversations.messages(readDestination, before);
+      if (revision !== channelMutationRef.current) { setChannelError("Riwayat berubah saat dimuat. Coba muat pesan sebelumnya lagi."); return; }
+      const older: Msg[] = data.map(message => ({ id: message.sequence, revision: message.revision || 1, authorId: message.author_id, author: message.author_id === accountId ? profile.name : message.author, authorUsername: message.username, text: message.text, time: new Intl.DateTimeFormat("id-ID", {hour:"2-digit",minute:"2-digit"}).format(new Date(message.created_at)) }));
+      setChannelMessages(previous => ({ ...previous, [targetKey]: prependHistory(previous[targetKey] || [], older) }));
+      setHistoryEnds(previous => ({ ...previous, [targetKey]: data.length < 100 }));
+      requestAnimationFrame(() => { if (body && body.dataset.conversation === targetKey) body.scrollTop = top + body.scrollHeight - height; });
+    } catch (err) {
+      if (err instanceof ApiError && [401,403,404].includes(err.status)) { setChannelMessages(previous => ({ ...previous, [targetKey]: [] })); setMessageLoad(previous => ({ ...previous, [targetKey]: { loading: false, blocked: true, error: "Percakapan tidak tersedia atau akses kamu telah berubah." } })); }
+      else setChannelError("Pesan yang lebih lama belum bisa dimuat. Coba lagi.");
+    }
+    finally { setLoadingHistory(false); }
+  }
 
   const markVisibleAsRead = useCallback(() => {
     const body = chatBodyRef.current;
@@ -665,7 +821,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
       !canMarkRead({
         visible: document.visibilityState === "visible",
         focused: document.hasFocus(),
-        covered: !!dialog || mobileList,
+        covered: !!dialog || !!viewingUser || !!joinWsOffer || mobileList,
         filtering: !!search.trim(),
         distanceFromBottom:
           body.scrollHeight - body.scrollTop - body.clientHeight,
@@ -674,10 +830,14 @@ export default function Messenger({ accountId }: { accountId: string }) {
       return;
     const latest = [...list].reverse().find((m) => m.authorId ? m.authorId !== accountId : m.author !== profile.name);
     if (!latest) return;
-    setReadCursors((prev) =>
-      prev[key] === latest.id ? prev : { ...prev, [key]: latest.id }
-    );
-  }, [key, list, dialog, mobileList, search, profile.name, accountId]);
+    if (!readDestination || (readCursors[key] || 0) >= latest.id || readPending.current.has(key)) return;
+    readPending.current.add(key);
+    const client = isWorkspace ? api.channelMessages : api.conversations;
+    void client.read(readDestination, latest.id).then(state => {
+      setReadCursors(previous => ({ ...previous, [key]: Math.max(previous[key] || 0, state.last_read_sequence) }));
+    }).catch(() => setChannelError("Tanda pesan terbaca belum tersimpan. Kami akan mencoba lagi nanti."))
+      .finally(() => readPending.current.delete(key));
+  }, [key, list, dialog, viewingUser, joinWsOffer, mobileList, search, profile.name, accountId, readDestination, readCursors, isWorkspace]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(markVisibleAsRead);
@@ -697,61 +857,96 @@ export default function Messenger({ accountId }: { accountId: string }) {
     setDrafts((x) => ({ ...x, [key]: v }));
   }
 
-  async function send(e?: FormEvent) {
+  async function send(e?: FormEvent, retry = false) {
     e?.preventDefault();
-    if (!draft.trim() || !selected) return;
+    if ((retry ? !pendingSends[key]?.failed : !draft.trim() || !!pendingSends[key]) || !selected || editConflict || messageLoad[key]?.blocked || actionRef.current) return;
     if (ws || activeDm?.conversationId) {
       const destinationId = ws ? channelId : activeDm?.conversationId;
-      if (!destinationId || sendingChannelMessage) return;
+      if (!destinationId || sendingRef.current) return;
+      sendingRef.current = true;
       setSendingChannelMessage(true);
       setChannelError("");
-      const text = draft.trim();
+      const text = retry ? pendingSends[key].text : draft.trim();
       let submitted = false;
       try {
+        if (editing !== null) {
+          const revision = editRevision.current;
+          channelMutationRef.current += 1;
+          try {
+            const saved = ws ? await api.channelMessages.edit(destinationId, editing, text, revision) : await api.conversations.edit(destinationId, editing, text, revision);
+            setChannelMessages(previous => ({ ...previous, [key]: (previous[key] || []).map(item => item.id === editing ? { ...item, text: saved.text, revision: saved.revision } : item) }));
+            setEditing(null);
+            setDrafts(previous => ({ ...previous, [key]: "" }));
+          } catch (err) {
+            if (err instanceof ApiError && [409, 412].includes(err.status)) { setEditConflict(true); setMessageAttempt(value => value + 1); setChannelError("Pesan sudah berubah. Draf edit dipertahankan. Muat versi terbaru sebelum mengedit kembali."); }
+            else setChannelError(err instanceof Error ? err.message : "Pesan belum bisa diperbarui. Coba lagi.");
+          }
+          finally { channelMutationRef.current += 1; setSendingChannelMessage(false); sendingRef.current = false; }
+          return;
+        }
+        setPendingSends(previous => ({ ...previous, [key]: { text, failed: false } }));
+        if (!retry) setDrafts(previous => previous[key] === draft ? { ...previous, [key]: "" } : previous);
         const pending = await pendingChannelRequest(sessionStorage, crypto, accountId, destinationId, text);
         submitted = true;
         const m = ws ? await api.channelMessages.send(destinationId, text, pending.key) : await api.conversations.send(destinationId, text, pending.key);
         try { sessionStorage.removeItem(pending.storageKey); } catch {
-          setChannelError("Pesan terkirim, tetapi data percobaan kirim belum dapat dibersihkan di browser.");
+          setChannelError("Pesanmu sudah terkirim. Muat ulang percakapan untuk menyegarkan tampilannya.");
         }
         channelMutationRef.current += 1;
         setChannelMessages((previous) => ({ ...previous, [key]: [...(previous[key] || []).filter((item) => item.id !== m.sequence), {
-          id: m.sequence, authorId: m.author_id, author: profile.name, authorUsername: m.username, text: m.text,
+          id: m.sequence, revision: m.revision || 1, authorId: m.author_id, author: profile.name, authorUsername: m.username, text: m.text,
           time: new Intl.DateTimeFormat("id-ID", { hour: "2-digit", minute: "2-digit" }).format(new Date(m.created_at)),
         }].sort((a,b) => a.id-b.id) }));
-        setDrafts((previous) => previous[key] === draft ? { ...previous, [key]: "" } : previous);
+        setPendingSends(previous => { const next = { ...previous }; delete next[key]; return next; });
       } catch (error) {
+        setPendingSends(previous => ({ ...previous, [key]: { text, failed: true, rejected: error instanceof ApiError && [400, 401, 403, 404, 413, 422].includes(error.status) } }));
         if (!submitted) {
-          setChannelError(error instanceof Error && error.message.includes("percobaan kirim")
-            ? error.message
-            : "Pesan belum dikirim karena penyimpanan percobaan kirim tidak tersedia di browser.");
+          setChannelError(error instanceof Error ? error.message : "Pesan belum terkirim. Coba lagi.");
         } else if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
           setChannelError(error.status === 409
-            ? "Percobaan kirim tidak lagi dapat diulang. Periksa riwayat pesan."
-            : "Pesan ditolak. Periksa akses dan isi pesan sebelum mencoba lagi.");
+            ? "Percobaan kirim berbenturan atau terlalu lama untuk diulang. Periksa riwayat; jangan membuat kiriman baru untuk pesan yang sama."
+            : error.message);
         } else {
-          setChannelError("Status kirim belum dapat dipastikan. Coba kirim lagi tanpa mengubah pesan.");
+          setChannelError("Belum bisa dipastikan apakah pesan terkirim. Periksa percakapan sebelum mencoba lagi.");
         }
-      } finally { setSendingChannelMessage(false); }
+      } finally { setSendingChannelMessage(false); sendingRef.current = false; }
       return;
     }
-    setChannelError("Percakapan belum siap. Buka kembali dan coba kirim pesan lagi.");
+    setChannelError("Percakapan belum bisa dibuka. Buka kembali, lalu coba kirim pesan lagi.");
   }
 
-  function changeMsg(id: number, fn: (m: Msg) => Msg) {
-    setMessages((x) => ({
-      ...x,
-      [key]: (x[key] || []).map((m) => (m.id === id ? fn(m) : m)),
-    }));
+  async function mutateMessage(message: Msg, action: "delete" | "heart-add" | "heart-remove") {
+    if (!readDestination || actionRef.current || messageLoad[key]?.blocked) return;
+    if (action === "delete" && !window.confirm("Hapus pesan ini?")) return;
+    actionRef.current = true; setMessageBusy(message.id); channelMutationRef.current += 1; setChannelError("");
+    const heartKey = `${key}:${message.id}`;
+    const previousHeart = hearts[heartKey];
+    if (action === "delete") setChannelMessages(previous => ({ ...previous, [key]: (previous[key] || []).filter(item => item.id !== message.id) }));
+    else setHearts(previous => ({ ...previous, [heartKey]: action === "heart-add" }));
+    try {
+      const client = isWorkspace ? api.channelMessages : api.conversations;
+      if (action === "delete") await client.delete(readDestination, message.id);
+      else await client.react(readDestination, message.id, action === "heart-add");
+      if (action === "delete" && editing === message.id) { setEditing(null); setEditConflict(false); }
+      setNotice(action === "delete" ? "Pesan berhasil dihapus." : action === "heart-add" ? "Heart berhasil ditambahkan." : "Heart kamu berhasil dihapus.");
+    } catch (err) {
+      const blocked = err instanceof ApiError && [401,403,404].includes(err.status);
+      if (blocked) { setChannelMessages(previous => ({ ...previous, [key]: [] })); setMessageLoad(previous => ({ ...previous, [key]: { loading: false, blocked: true, error: "Percakapan tidak tersedia atau akses kamu telah berubah." } })); }
+      else if (action === "delete") setChannelMessages(previous => ({ ...previous, [key]: prependHistory(previous[key] || [], [message]) }));
+      if (action !== "delete") setHearts(previous => ({ ...previous, [heartKey]: previousHeart }));
+      setChannelError(err instanceof Error ? err.message : "Perubahan pesan belum berhasil. Coba lagi.");
+      setMessageAttempt(value => value + 1);
+    } finally { channelMutationRef.current += 1; actionRef.current = false; setMessageBusy(null); }
   }
 
   function selectSpace(id: string) {
     setSpace(id);
+    setEditing(null); setEditConflict(false); setChannelError("");
     if (id === "dm") {
-      setSelected(dmContacts[0]?.username || "");
+      setSelected(dmContacts[0]?.conversationId || "");
     } else {
       const targetWs = spaces.find((w) => w.id === id);
-      setSelected(targetWs?.channels?.[0]?.slug || "umum");
+      setSelected(targetWs?.channels?.[0]?.slug || "");
     }
     setSearch("");
     setPanel("");
@@ -763,6 +958,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
     username: string;
     name?: string;
     avatar?: string;
+    banner?: string;
     bio?: string;
     status?: string;
     customStatus?: string;
@@ -781,17 +977,18 @@ export default function Messenger({ accountId }: { accountId: string }) {
         name: user.name || user.username,
         username: user.username,
         avatar: user.avatar,
+        banner: user.banner,
         status: user.status || "online",
         customStatus: user.customStatus,
         bio: user.bio,
       };
       setDmContacts((prev) => [newContact, ...prev.filter((contact) => contact.id !== userId)]);
     setSpace("dm");
-    setSelected(user.username);
+    setSelected(conversation.id);
     setDialog("");
     setViewingUser(null);
     setMobileList(false);
-    } catch (error) { setNotice(error instanceof Error ? error.message : "Percakapan tidak dapat dibuka."); }
+    } catch (error) { setNotice(error instanceof ApiError ? error.message : "Belum bisa membuka percakapan sekarang. Coba lagi sebentar."); }
   }
 
   // Create Workspace in real PostgreSQL backend
@@ -807,7 +1004,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
       });
       setSpaces((prev) => [...prev, created]);
       setSpace(created.id);
-      setSelected(created.channels?.[0]?.slug || "umum");
+      setSelected(created.channels?.[0]?.slug || "");
       setDialog("");
       setNewName("");
       setNewDesc("");
@@ -816,7 +1013,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
       if (err instanceof ApiError) {
         setNotice(err.message);
       } else {
-        setNotice("Gagal membuat workspace.");
+        setNotice("Belum bisa membuat ruang baru. Coba lagi sebentar.");
       }
     } finally {
       setCreatingWs(false);
@@ -826,10 +1023,12 @@ export default function Messenger({ accountId }: { accountId: string }) {
   // Create Channel in real PostgreSQL backend
   async function createChannel(e: FormEvent) {
     e.preventDefault();
-    if (!ws || !newName.trim()) return;
+    if (!ws || !newName.trim() || creatingWs) return;
+    setCreatingWs(true);
     try {
       const created = await api.workspaces.createChannel(ws.id, {
         name: newName.trim(),
+        visibility: newChannelVisibility,
       });
       setSpaces((prev) =>
         prev.map((w) =>
@@ -839,23 +1038,30 @@ export default function Messenger({ accountId }: { accountId: string }) {
       setSelected(created.slug);
       setDialog("");
       setNewName("");
+      setNewChannelVisibility("public");
       setNotice("");
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setNotice(err.message);
       } else {
-        setNotice("Gagal membuat channel.");
+        setNotice("Belum bisa membuat channel baru. Coba lagi sebentar.");
       }
-    }
+    } finally { setCreatingWs(false); }
+  }
+
+  function openPrivateAccess(channelId: string) {
+    if (ws?.owner_user_id !== accountId) return;
+    setPrivateAccessChannel(channelId); setDialog("private-access"); setNotice("");
   }
 
   async function loadWorkspaceInvites(workspaceID: string) {
+    setInviteListError("");
     try {
       const items = await api.workspaces.listInvites(workspaceID);
       setWorkspaceInvites(items);
     } catch (err) {
       setWorkspaceInvites([]);
-      if (err instanceof ApiError && err.status !== 403) setNotice(err.message);
+      setInviteListError(err instanceof ApiError && err.status === 403 ? "Kamu tidak memiliki izin mengelola daftar undangan." : err instanceof Error ? err.message : "Daftar undangan gagal dimuat.");
     }
   }
 
@@ -878,7 +1084,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
   }
 
   async function createWorkspaceInvite() {
-    if (!inviteWsTarget) return;
+    if (!inviteWsTarget || loadingInvite) return;
     setLoadingInvite(true);
     setNotice("");
     try {
@@ -893,7 +1099,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
       if (err instanceof ApiError) {
         setNotice(err.message);
       } else {
-        setNotice("Tautan undangan belum dapat dibuat. Silakan coba lagi.");
+        setNotice("Tautan undangan belum berhasil dibuat. Coba lagi sebentar.");
       }
     } finally {
       setLoadingInvite(false);
@@ -901,7 +1107,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
   }
 
   async function revokeWorkspaceInvite(inviteID: string) {
-    if (!inviteWsTarget) return;
+    if (!inviteWsTarget || revokingInviteID || !window.confirm("Cabut undangan ini? Tautan tidak dapat dipakai lagi.")) return;
     setRevokingInviteID(inviteID);
     setNotice("");
     try {
@@ -909,8 +1115,9 @@ export default function Messenger({ accountId }: { accountId: string }) {
       setWorkspaceInvites((items) =>
         items.map((item) => item.id === inviteID ? { ...item, status: "revoked", revoked_at: new Date().toISOString() } : item)
       );
+      setNotice("Undangan berhasil dicabut.");
     } catch (err) {
-      setNotice(err instanceof ApiError ? err.message : "Undangan tidak dapat dicabut.");
+      setNotice(err instanceof ApiError ? err.message : "Belum bisa membatalkan undangan. Coba lagi sebentar.");
     } finally {
       setRevokingInviteID("");
     }
@@ -928,14 +1135,14 @@ export default function Messenger({ accountId }: { accountId: string }) {
         return [...prev, joined];
       });
       setSpace(joined.id);
-      setSelected(joined.channels?.[0]?.slug || "umum");
+      setSelected(joined.channels?.[0]?.slug || "");
       setJoinWsOffer(null);
       setNotice("");
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         setNotice(err.message);
       } else {
-        setNotice("Gagal bergabung ke workspace.");
+        setNotice("Belum bisa bergabung ke ruang ini. Coba lagi sebentar.");
       }
     } finally { setJoiningWorkspace(false); }
   }
@@ -962,56 +1169,13 @@ export default function Messenger({ accountId }: { accountId: string }) {
       if (err instanceof ApiError) {
         setNotice(err.message);
       } else {
-        setNotice("Kode undangan tidak valid atau kedaluwarsa.");
+        setNotice("Kode undangan belum bisa diperiksa. Pastikan kodenya benar, lalu coba lagi.");
       }
-    }
-  }
-
-  // Upload file avatar or banner to real backend storage with instant preview
-  async function upload(
-    e: React.ChangeEvent<HTMLInputElement>,
-    field: "avatar" | "banner"
-  ) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const localUrl = URL.createObjectURL(file);
-    setProfile((x) => ({ ...x, [field]: localUrl }));
-    setUploadingField(field);
-    setNotice(`Mengunggah ${field === "avatar" ? "foto profil" : "banner"}...`);
-
-    try {
-      const media = await api.media.uploadAndFinalize(file, field);
-      if (field === "avatar") {
-        const updated = await api.user.setAvatar(media.id);
-        setProfile((x) => ({
-          ...x,
-          avatar: updated.avatar_url || media.public_url,
-          revision: updated.revision,
-        }));
-      } else {
-        const updated = await api.user.setBanner(media.id);
-        setProfile((x) => ({
-          ...x,
-          banner: updated.banner_url || media.public_url,
-          revision: updated.revision,
-        }));
-      }
-      setNotice(
-        `${field === "avatar" ? "Foto profil" : "Banner"} berhasil disimpan!`
-      );
-    } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setNotice(err.message);
-      } else {
-        setNotice("Gambar belum dapat disimpan. Silakan coba lagi.");
-      }
-    } finally {
-      setUploadingField(null);
     }
   }
 
   async function saveProfile() {
+    if (savingProfile || profileConflict || mediaPending) return;
     setSavingProfile(true);
     setNotice("Menyimpan perubahan profil...");
     try {
@@ -1028,35 +1192,23 @@ export default function Messenger({ accountId }: { accountId: string }) {
       setProfile((x) => ({
         ...x,
         name: updated.display_name,
-        username: updated.username,
+        username: updated.username || x.username,
         bio: updated.bio || "",
-        status: updated.availability || "Tersedia",
+        status: updated.availability || "online",
         custom: updated.custom_status || "",
         revision: updated.revision,
       }));
+      setProfileConflict(false);
       setNotice("Profil berhasil disimpan.");
     } catch (err: unknown) {
       if (err instanceof ApiError) {
-        setNotice(err.message);
+        if (err.status === 412) { setProfileConflict(true); setNotice("Profil berubah di perangkat lain. Draf tetap tersedia. Muat profil terbaru sebelum menyimpan lagi."); }
+        else setNotice(err.message);
       } else {
-        setNotice("Gagal menyimpan profil.");
+        setNotice("Profil belum berhasil disimpan. Coba lagi sebentar.");
       }
     } finally {
       setSavingProfile(false);
-    }
-  }
-
-  async function handleRevokeSession(sessionId: string) {
-    try {
-      await api.user.revokeSession(sessionId);
-      setRealSessions((prev) => prev.filter((s) => s.id !== sessionId));
-      setNotice("Sesi berhasil dicabut.");
-    } catch (err: unknown) {
-      if (err instanceof ApiError) {
-        setNotice(err.message);
-      } else {
-        setNotice("Gagal mencabut sesi.");
-      }
     }
   }
 
@@ -1064,8 +1216,8 @@ export default function Messenger({ accountId }: { accountId: string }) {
     try {
       await signOutEverywhere();
       router.push("/login");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Gagal keluar. Coba lagi.");
+    } catch {
+      setNotice("Logout belum terkonfirmasi oleh server. Periksa koneksi lalu coba keluar lagi.");
     }
   }
 
@@ -1207,7 +1359,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
           </div>
           {ws && (
             <button
-              onClick={() => setDialog("workspace-settings")}
+              onClick={() => { setDialog("workspace-settings"); setWorkspaceAttempt(value => value + 1); }}
               aria-label="Pengaturan workspace"
             >
               <Settings size={18} />
@@ -1215,6 +1367,12 @@ export default function Messenger({ accountId }: { accountId: string }) {
           )}
         </div>
 
+        {spacesLoading && <p role="status">Memuat workspace...</p>}
+        {spacesError && <div role="alert"><p>{spacesError}</p><button className="secondary-button" onClick={() => { setSpacesLoading(true); void refreshWorkspaces(); }}>Coba muat workspace lagi</button></div>}
+        {space !== "dm" && !workspaceReady && <div className="workspace-state" role={workspaceLoad.error ? "alert" : "status"}>
+          <p>{workspaceLoad.id === space && workspaceLoad.error ? workspaceLoad.error : "Memuat detail workspace..."}</p>
+          {workspaceLoad.error && <><button className="secondary-button" onClick={() => setWorkspaceAttempt(value => value + 1)}>Coba lagi</button><button className="secondary-button" onClick={() => setDialog("join-code")}>Gunakan undangan</button></>}
+        </div>}
         {ws ? (
           <>
             <p className="side-description">{ws.description || "Ruang untuk berbagi cerita dan ide."}</p>
@@ -1243,17 +1401,22 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 key={c.slug}
                 className={`chat-row channel-row ${selected === c.slug ? "selected" : ""}`}
                 onClick={() => {
-                  setSelected(c.slug);
+                  setSelected(c.slug); setEditing(null); setEditConflict(false); setChannelError("");
                   setMobileList(false);
                 }}
               >
-                <Hash size={14} style={{ opacity: 0.6 }} />
+                {c.visibility === "private" ? <Shield size={13} style={{ opacity: 0.7 }} /> : <Hash size={14} style={{ opacity: 0.6 }} />}
                 {c.name}
               </button>
             ))}
+            {ws.owner_user_id === accountId && activeChannel?.visibility === "private" && (
+              <button className="side-invite" onClick={() => void openPrivateAccess(activeChannel.id)}>
+                <Users size={14} style={{ display:"inline", marginRight:6 }} /> Kelola akses channel privat
+              </button>
+            )}
 
             <div className="side-section">
-              <span>ANGGOTA - {ws.members?.length || 1}</span>
+              <span>ANGGOTA - {ws.members?.length || 0}</span>
               <button onClick={() => setPanel("members")}>Lihat</button>
             </div>
             {ws.members?.map((m) => (
@@ -1278,10 +1441,10 @@ export default function Messenger({ accountId }: { accountId: string }) {
               </button>
             ))}
           </>
-        ) : space !== "dm" && spaces.length === 0 ? (
+        ) : space !== "dm" ? (
           <div style={{ padding: "20px 8px", textAlign: "center" }}>
             <p style={{ fontSize: "12px", color: "#8a9686", lineHeight: "1.6" }}>
-              Kamu belum memiliki workspace.
+              {workspaceLoad.error ? "Workspace ini belum dapat dibuka." : "Menyiapkan workspace..."}
             </p>
             <button
               className="primary-button"
@@ -1328,7 +1491,9 @@ export default function Messenger({ accountId }: { accountId: string }) {
               </button>
             </div>
 
-            {dmContacts.length === 0 ? (
+            {dmLoading && <p role="status">Memuat percakapan...</p>}
+            {dmError && <div role="alert"><p>{dmError}</p><button className="secondary-button" onClick={() => { setDmError(""); setDmLoading(true); setDmAttempt(value => value + 1); }}>Coba muat percakapan lagi</button></div>}
+            {!dmLoading && !dmError && dmContacts.length === 0 ? (
               <div style={{ padding: "16px 8px", textAlign: "center" }}>
                 <p style={{ fontSize: "11px", color: "#8a9686", lineHeight: "1.6" }}>
                   Belum ada percakapan pribadi.
@@ -1354,29 +1519,29 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 )
                 .map((contact) => (
                   <button
-                    key={contact.username}
+                    key={contact.conversationId || contact.id}
                     onClick={() => {
-                      setSelected(contact.username);
+                      setSelected(contact.conversationId || ""); setEditing(null); setEditConflict(false); setChannelError("");
                       setSearch("");
                       setMobileList(false);
                     }}
-                    className={`chat-row ${selected === contact.username ? "selected" : ""}`}
+                    className={`chat-row ${selected === contact.conversationId ? "selected" : ""}`}
                   >
                     <LuxuryAvatar
                       name={contact.name}
                       src={contact.avatar}
                       size={40}
-                      status={contact.status || "online"}
+                      status={contact.status}
                     />
                     <span className="chat-info">
                       <b>{contact.name}</b>
                       <small>
-                        {(channelMessages[contact.username] || []).at(-1)?.text || `@${contact.username}`}
+                        {(channelMessages[`dm:${contact.conversationId}`] || []).at(-1)?.text || (contact.username ? `@${contact.username}` : "Percakapan pribadi")}
                       </small>
                     </span>
-                    {unreadCount(channelMessages[contact.username] || [], readCursors[contact.username], accountId) > 0 && (
+                    {unreadCount(channelMessages[`dm:${contact.conversationId}`] || [], readCursors[`dm:${contact.conversationId}`], accountId) > 0 && (
                       <i className="unread">
-                        {unreadCount(channelMessages[contact.username] || [], readCursors[contact.username], accountId)}
+                        {unreadCount(channelMessages[`dm:${contact.conversationId}`] || [], readCursors[`dm:${contact.conversationId}`], accountId)}
                       </i>
                     )}
                   </button>
@@ -1446,15 +1611,16 @@ export default function Messenger({ accountId }: { accountId: string }) {
               name={activeDm?.name || selected || "?"}
               src={activeDm?.avatar}
               size={42}
-              status={activeDm?.status || "online"}
+              status={activeDm?.status}
               onClick={() => {
                 if (activeDm) {
                   setViewingUser({
                     name: activeDm.name,
                     username: activeDm.username,
                     avatar: activeDm.avatar,
+                    banner: activeDm.banner,
                     bio: activeDm.bio,
-                    status: activeDm.status || "online",
+                    status: activeDm.status,
                     custom: activeDm.customStatus,
                     role: "Anggota",
                   });
@@ -1464,7 +1630,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
           )}
           <div>
             <h2>{currentChatName}</h2>
-            <p>{ws ? ws.name : activeDm ? `@${activeDm.username}` : "Pesan pribadi"}</p>
+            <p>{ws ? ws.name : activeDm?.username ? `@${activeDm.username}` : "Pesan pribadi"}</p>
           </div>
           <div className="header-tools">
             <button
@@ -1486,8 +1652,9 @@ export default function Messenger({ accountId }: { accountId: string }) {
                     name: activeDm.name,
                     username: activeDm.username,
                     avatar: activeDm.avatar,
+                    banner: activeDm.banner,
                     bio: activeDm.bio,
-                    status: activeDm.status || "online",
+                    status: activeDm.status,
                     custom: activeDm.customStatus,
                   });
                 } else {
@@ -1501,7 +1668,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
           </div>
         </header>
 
-        {!isConnected && <div className="demo-bar" role="status">Koneksi sedang bermasalah. Sebagian informasi mungkin belum terbaru.</div>}
+        {!isConnected && <div className="demo-bar" role="alert">Profil belum dapat dimuat.<button onClick={() => window.location.reload()}>Coba lagi</button></div>}
 
         {panel === "search" && (
           <div className="search-line">
@@ -1522,9 +1689,15 @@ export default function Messenger({ accountId }: { accountId: string }) {
           </div>
         )}
 
-        {channelError && <div className="demo-bar" role="alert">{channelError}</div>}
+        {notice && !dialog && <div className="demo-bar" role="status">{notice}<button onClick={() => setNotice("")} aria-label="Tutup pemberitahuan"><X size={14} /></button></div>}
+        {channelError && <div className="demo-bar" role="alert">{channelError}<button onClick={() => { setMessageAttempt(value => value + 1); setChannelError(""); }}>Muat ulang percakapan</button></div>}
+        {readDestination && (!messageLoad[key] || messageLoad[key].loading) && <p className="demo-bar" role="status">Memuat pesan...</p>}
+        {messageLoad[key]?.error && <div className="demo-bar" role="alert">{messageLoad[key].error}<button onClick={() => setMessageAttempt(value => value + 1)}>Coba lagi</button></div>}
 
-        <div className="chat-body" ref={chatBodyRef} onScroll={markVisibleAsRead}>
+        {space !== "dm" && !workspaceReady && <div className="workspace-state" role={workspaceLoad.error ? "alert" : "status"}><p>{workspaceLoad.error || "Memuat workspace..."}</p>{workspaceLoad.error && <><button className="secondary-button" onClick={() => setWorkspaceAttempt(value => value + 1)}>Coba lagi</button><button className="secondary-button" onClick={() => setDialog("join-code")}>Gunakan undangan</button></>}</div>}
+        {ws && !ws.channels?.length && <p className="workspace-state">Belum ada channel yang dapat kamu akses. Hubungi owner untuk akses channel privat.</p>}
+        <div className="chat-body" ref={chatBodyRef} data-conversation={key} onScroll={markVisibleAsRead}>
+          {readDestination && list.length > 0 && !historyEnds[key] && <button className="secondary-button" onClick={() => void loadOlder()} disabled={loadingHistory}>{loadingHistory ? "Memuat riwayat..." : "Muat pesan sebelumnya"}</button>}
           {!selected && space === "dm" && dmContacts.length === 0 ? (
             <div className="empty-state-card">
               <div className="empty-state-badge">
@@ -1548,23 +1721,21 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 <button
                   className="secondary-button"
                   onClick={() => {
-                    navigator.clipboard.writeText(userInviteLink);
-                    setNotice("Tautan profil berhasil disalin!");
-                    setTimeout(() => setNotice(""), 3000);
+                    void copyText(userInviteLink).then(() => setNotice("Tautan profil berhasil disalin!")).catch(err => setNotice(err.message));
                   }}
                 >
                   <Copy size={13} /> Salin Link Profil
                 </button>
               </div>
             </div>
-          ) : space !== "dm" && spaces.length === 0 ? (
+          ) : space !== "dm" && (!workspaceReady || !selected) ? (
             <div className="empty-workspace-view">
               <div className="empty-state-badge">
                 <Users size={28} strokeWidth={1.5} />
               </div>
-              <h3 className="empty-state-title">Belum Ada Workspace</h3>
+              <h3 className="empty-state-title">{workspaceReady ? "Belum ada channel yang dapat dibuka" : "Workspace belum tersedia"}</h3>
               <p className="empty-state-subtitle">
-                Kamu belum membuat atau bergabung dengan workspace apa pun. Buat ruang baru untuk berkolaborasi dengan tim atau bergabung via tautan undangan!
+                Gunakan undangan untuk bergabung. Jika sudah menjadi anggota, hubungi owner untuk mendapatkan akses channel.
               </p>
               <div style={{ display: "flex", gap: "10px" }}>
                 <button
@@ -1575,7 +1746,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                     setDialog("workspace");
                   }}
                 >
-                  <Plus size={14} /> Buat Workspace Pertama
+                  <Plus size={14} /> Buat Workspace
                 </button>
                 <button
                   className="secondary-button"
@@ -1604,10 +1775,10 @@ export default function Messenger({ accountId }: { accountId: string }) {
               </div>
 
               <div className="date-divider">
-                <span>HARI INI</span>
+                <span>RIWAYAT PERCAKAPAN</span>
               </div>
 
-              {displayed.length === 0 && (
+              {displayed.length === 0 && messageLoad[key] && !messageLoad[key].error && (
                 <p className="empty-chat">
                   {search
                     ? "Tidak ada pesan yang cocok."
@@ -1619,13 +1790,13 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 <article className="message" key={m.id}>
                   <LuxuryAvatar
                     name={m.author}
-                    src={(m.authorId ? m.authorId === accountId : m.author === profile.name) ? profile.avatar : m.authorAvatar}
+                    src={messageAvatar(m)}
                     size={38}
                     onClick={() => {
                       setViewingUser({
                         name: m.author,
                         username: m.authorUsername || m.author.toLowerCase(),
-                        avatar: (m.authorId ? m.authorId === accountId : m.author === profile.name) ? profile.avatar : m.authorAvatar,
+                        avatar: messageAvatar(m),
                         status: "online",
                       });
                     }}
@@ -1633,12 +1804,14 @@ export default function Messenger({ accountId }: { accountId: string }) {
                   <div className="message-content">
                     <div className="message-meta">
                       <b
+                        role="button" tabIndex={0}
+                        onKeyDown={event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.currentTarget.click(); } }}
                         style={{ cursor: "pointer" }}
                         onClick={() => {
                           setViewingUser({
                             name: m.author,
                             username: m.authorUsername || m.author.toLowerCase(),
-                            avatar: (m.authorId ? m.authorId === accountId : m.author === profile.name) ? profile.avatar : m.authorAvatar,
+                            avatar: messageAvatar(m),
                             status: "online",
                           });
                         }}
@@ -1650,68 +1823,50 @@ export default function Messenger({ accountId }: { accountId: string }) {
                     </div>
                     {m.reply && <div className="reply-preview">&#8618; {m.reply}</div>}
                     <p>{m.text}</p>
-                    {m.reaction && (
-                      <button
-                        className="reaction"
-                        onClick={() =>
-                          changeMsg(m.id, (x) => ({ ...x, reaction: undefined }))
-                        }
-                      >
-                        {m.reaction} 1
-                      </button>
-                    )}
+                    {hearts[`${key}:${m.id}`] && <small className="heart-feedback" role="status">? Heart kamu ditambahkan pada sesi ini</small>}
                     {m.pin && (
                       <small className="pinned-label">&#9831; Disematkan</small>
                     )}
                   </div>
-                  {!ws && !activeDm?.conversationId && <div className="message-actions">
+                  <div className="message-actions">
                     <button
-                      onClick={() =>
-                        changeMsg(m.id, (x) => ({
-                          ...x,
-                          reaction: x.reaction ? undefined : "\u2665",
-                        }))
-                      }
-                      aria-label="Beri reaksi"
-                    >
-                      &#9825;
-                    </button>
+                      disabled={messageBusy !== null}
+                      onClick={() => void mutateMessage(m, "heart-add")}
+                      aria-label="Tambahkan heart"
+                    >?</button>
+                    <button disabled={messageBusy !== null} onClick={() => void mutateMessage(m, "heart-remove")} aria-label="Hapus heart kamu">??</button>
                     <button onClick={() => setReply(m)} aria-label="Balas pesan">
                       &#8617;
                     </button>
                     <button
-                      onClick={() =>
-                        changeMsg(m.id, (x) => ({ ...x, pin: !x.pin }))
-                      }
+                      onClick={() => setNotice("Fitur sematkan pesan segera hadir.")}
                       aria-label="Sematkan pesan"
                     >
                       <Pin size={13} />
                     </button>
-                    {m.author === profile.name && (
+                    {m.authorId === accountId && (
                       <>
                         <button
                           onClick={() => {
-                            setEditing(m.id);
+                            if (pendingSends[key]) return;
+                            setEditing(m.id); editRevision.current = m.revision || 1; setEditConflict(false);
                             updateDraft(m.text);
                           }}
+                          disabled={sendingChannelMessage || !!pendingSends[key]}
                           aria-label="Edit pesan"
                         >
                           &#9998;
                         </button>
                         <button
-                          onClick={() =>
-                            setMessages((x) => ({
-                              ...x,
-                              [key]: (x[key] || []).filter((y) => y.id !== m.id),
-                            }))
-                          }
+                          disabled={messageBusy !== null}
+                          onClick={() => void mutateMessage(m, "delete")}
                           aria-label="Hapus pesan"
                         >
                           <X size={14} />
                         </button>
                       </>
                     )}
-                  </div>}
+                  </div>
                 </article>
               ))}
             </>
@@ -1720,6 +1875,21 @@ export default function Messenger({ accountId }: { accountId: string }) {
 
         {/* --- COMPOSER AREA --- */}
         <div className="composer-area">
+          {pendingSends[key] && <div className="pending-message" role="status"><p>{pendingSends[key].text}</p><small>{pendingSends[key].rejected ? "Server menolak pengiriman. Periksa kembali draf atau akses akun." : pendingSends[key].failed ? "Status pengiriman belum dipastikan. Coba lagi sebelum mengirim draf baru." : "Mengirim... Kamu tetap dapat menulis draf berikutnya."}</small>{pendingSends[key].failed && <button className="secondary-button" disabled={sendingChannelMessage || !!messageLoad[key]?.blocked} onClick={() => void send(undefined, true)}>Coba kirim lagi</button>}
+            {pendingSends[key].rejected && <button className="secondary-button" onClick={() => { setDrafts(previous => ({ ...previous, [key]: previous[key]?.trim() ? previous[key] : pendingSends[key].text })); setPendingSends(previous => { const next = { ...previous }; delete next[key]; return next; }); }}>{draft.trim() ? "Singkirkan pesan yang ditolak" : "Perbaiki draf"}</button>}
+          </div>}
+          {editConflict && <button className="secondary-button" disabled={sendingChannelMessage} onClick={async () => {
+            if (!readDestination || editing === null || !window.confirm("Ganti draf edit dengan versi pesan terbaru?")) return;
+            try {
+              const page = isWorkspace ? await api.channelMessages.list(readDestination, editing + 1) : await api.conversations.messages(readDestination, editing + 1);
+              const latest = page.find(message => message.sequence === editing);
+              if (latest) {
+                editRevision.current = latest.revision || 1; updateDraft(latest.text); setEditConflict(false); setChannelError("");
+                setChannelMessages(previous => ({ ...previous, [key]: (previous[key] || []).map(message => message.id === editing ? { ...message, text: latest.text, revision: latest.revision } : message) }));
+              } else { setChannelError("Pesan sudah dihapus. Draf edit dipertahankan sampai kamu membatalkannya."); }
+            } catch (err) { setChannelError(err instanceof Error ? err.message : "Versi terbaru belum dapat dimuat."); }
+          }}>Gunakan versi terbaru</button>}
+          {readDestination && readCursors[key] !== undefined && <small className="read-receipt">Posisi baca kamu tersimpan hingga pesan #{readCursors[key]}. Status baca penerima belum tersedia.</small>}
           {reply && (
             <div className="composer-context">
               Membalas {reply.author}: {reply.text}
@@ -1733,7 +1903,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
               Mengedit pesan{" "}
               <button
                 onClick={() => {
-                  setEditing(null);
+                  setEditing(null); setEditConflict(false);
                   updateDraft("");
                 }}
               >
@@ -1763,7 +1933,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
               <small>Ekspresi interaktif Relay</small>
             </div>
           )}
-          <form className="composer" onSubmit={send}>
+          <form className="composer" onSubmit={event => void send(event)}>
             <button
               type="button"
               onClick={() => setPicker(picker === "emoji" ? "" : "emoji")}
@@ -1788,7 +1958,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
             >
               <Sparkles size={18} />
             </button>
-            <button className="send-button" aria-label="Kirim pesan" disabled={!selected || !draft.trim() || sendingChannelMessage || (space === "dm" ? !activeDm?.conversationId : !channelId)}>
+            <button className="send-button" aria-label="Kirim pesan" disabled={!!pendingSends[key] || !!messageLoad[key]?.blocked || editConflict || !selected || !draft.trim() || sendingChannelMessage || (space === "dm" ? !activeDm?.conversationId : !channelId)}>
               <SendHorizontal size={17} strokeWidth={2} /><span>Kirim</span>
             </button>
           </form>
@@ -1831,7 +2001,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
             </>
           ) : ws ? (
             <>
-              <p className="detail-muted">{ws.members?.length || 1} anggota</p>
+              <p className="detail-muted">{ws.members?.length || 0} anggota</p>
               {ws.members?.map((m) => (
                 <div
                   className="detail-member"
@@ -1858,7 +2028,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
               ))}
               <button
                 className="secondary-button"
-                onClick={() => setDialog("workspace-settings")}
+                onClick={() => { setDialog("workspace-settings"); setWorkspaceAttempt(value => value + 1); }}
                 style={{ width: "100%", marginTop: "16px" }}
               >
                 <Settings size={14} /> Pengaturan workspace
@@ -1873,11 +2043,13 @@ export default function Messenger({ accountId }: { accountId: string }) {
         <div
           className="modal-backdrop"
           onMouseDown={(e) => {
-            if (e.target === e.currentTarget) setDialog("");
+            if (e.target === e.currentTarget) closeDialog();
           }}
         >
           <div
             className={`modal ${dialog === "search-users" ? "modal-discovery" : ""}`}
+            ref={modalRef}
+            tabIndex={-1}
             role="dialog"
             aria-modal="true"
             aria-label="Dialog"
@@ -1885,8 +2057,8 @@ export default function Messenger({ accountId }: { accountId: string }) {
             <button
               className="modal-close"
               onClick={() => {
-                setDialog("");
-                setNotice("");
+                closeDialog();
+                if (!mediaPending) setNotice("");
               }}
               aria-label="Tutup"
             >
@@ -1894,7 +2066,8 @@ export default function Messenger({ accountId }: { accountId: string }) {
             </button>
 
             {/* --- CREATE WORKSPACE / CHANNEL --- */}
-            {dialog === "workspace" || dialog === "channel" ? (
+            {dialog === "private-access" && ws?.owner_user_id === accountId && <PrivateAccessSettings workspace={ws} channelId={privateAccessChannel} />}
+            {dialog === "private-access" ? null : dialog === "workspace" || dialog === "channel" ? (
               <>
                 <span className="modal-header-tag">
                   <Sparkles size={12} /> RUANG BARU
@@ -1922,6 +2095,15 @@ export default function Messenger({ accountId }: { accountId: string }) {
                       }
                     />
                   </label>
+                  {dialog === "channel" && (
+                    <label>
+                      Akses channel
+                      <select value={newChannelVisibility} onChange={event => setNewChannelVisibility(event.target.value as "public" | "private")}>
+                        <option value="public">Publik untuk anggota workspace</option>
+                        <option value="private">Privat untuk pembuat dan owner</option>
+                      </select>
+                    </label>
+                  )}
                   {dialog === "workspace" && (
                     <label>
                       Deskripsi
@@ -1955,7 +2137,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 </span>
                 <h2>Masukkan Kode Undangan.</h2>
                 <p>
-                  Tempelkan link undangan atau 8-karakter kode undangan yang kamu terima dari teman.
+                  Tempelkan tautan atau kode undangan yang kamu terima dari teman.
                 </p>
                 <form onSubmit={handleManualJoin}>
                   <label>
@@ -2007,7 +2189,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                           </select>
                         </label>
                       </div>
-                      <button className="invite-create-button" type="button" onClick={createWorkspaceInvite}>
+                      <button className="invite-create-button" disabled={loadingInvite} type="button" onClick={createWorkspaceInvite}>
                         <Sparkles size={14} /> Buat tautan aman
                       </button>
                     </section>
@@ -2032,10 +2214,10 @@ export default function Messenger({ accountId }: { accountId: string }) {
                                 className="invite-copy-btn"
                                 type="button"
                                 onClick={() => {
-                                  navigator.clipboard?.writeText(inviteGeneratedLink).then(() => {
+                                  copyText(inviteGeneratedLink).then(() => {
                                     setCopiedLink(true);
                                     setTimeout(() => setCopiedLink(false), 2500);
-                                  });
+                                  }).catch(err => setNotice(err.message));
                                 }}
                               >
                                 {copiedLink ? <><Check size={12} /> Tersalin</> : <><Copy size={12} /> Salin</>}
@@ -2052,12 +2234,13 @@ export default function Messenger({ accountId }: { accountId: string }) {
 
                     <section className="invite-ledger" aria-label="Undangan workspace">
                       <div className="invite-ledger-heading"><b>Undangan yang dikelola</b><small>{workspaceInvites.length} tercatat</small></div>
-                      {workspaceInvites.length ? workspaceInvites.map((item) => (
+                      {inviteListError && <div role="alert"><p>{inviteListError}</p><button className="secondary-button" onClick={() => inviteWsTarget && void loadWorkspaceInvites(inviteWsTarget.id)}>Coba muat daftar lagi</button></div>}
+                      {!inviteListError && (workspaceInvites.length ? workspaceInvites.map((item) => (
                         <div className="invite-ledger-row" key={item.id}>
                           <div><b>{item.status === "active" ? "Aktif" : item.status === "revoked" ? "Dicabut" : item.status === "expired" ? "Kedaluwarsa" : "Penuh"}</b><small>{item.max_uses === 0 ? `${item.uses} bergabung` : `${item.uses}/${item.max_uses} bergabung`} · hingga {new Intl.DateTimeFormat("id-ID", { day: "numeric", month: "short" }).format(new Date(item.expires_at))}</small></div>
                           {item.status === "active" ? <button type="button" onClick={() => revokeWorkspaceInvite(item.id)} disabled={revokingInviteID === item.id}>{revokingInviteID === item.id ? "Mencabut…" : "Cabut"}</button> : <span className="invite-ledger-status">{item.status}</span>}
                         </div>
-                      )) : <p className="invite-ledger-empty">Belum ada undangan aktif atau riwayat yang dapat dikelola.</p>}
+                      )) : <p className="invite-ledger-empty">Belum ada undangan aktif atau riwayat yang dapat dikelola.</p>)}
                     </section>
                     {notice && <p role="alert" className="invite-error">{notice}</p>}
                   </>
@@ -2098,6 +2281,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                     />
                   </div>
 
+                  {searchError && <div role="alert"><p>{searchError}</p><button className="secondary-button" onClick={() => setSearchAttempt(value => value + 1)}>Coba cari lagi</button></div>}
                   {searching && (
                     <div style={{ padding: "12px", textAlign: "center", fontSize: "11px", color: "#778a78" }}>
                       Mencari pengguna...
@@ -2127,6 +2311,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                                 username: u.username,
                                 name: u.display_name,
                                 avatar: u.avatar_url || "",
+                                banner: u.banner_url || "",
                                 bio: u.bio,
                                 status: u.availability || "online",
                                 customStatus: u.custom_status || "",
@@ -2138,7 +2323,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                           </button>
                         </div>
                       ))
-                    ) : searchQuery.trim() && !searching ? (
+                    ) : searchQuery.trim() && !searching && !searchError ? (
                       <div style={{ padding: "16px", textAlign: "center", fontSize: "11px", color: "#8a9686" }}>
                         Tidak ada pengguna yang cocok dengan &quot;{searchQuery}&quot;.
                       </div>
@@ -2159,10 +2344,10 @@ export default function Messenger({ accountId }: { accountId: string }) {
                     <button
                       className="invite-copy-btn"
                       onClick={() => {
-                        navigator.clipboard?.writeText(userInviteLink).then(() => {
+                        copyText(userInviteLink).then(() => {
                           setCopiedLink(true);
                           setTimeout(() => setCopiedLink(false), 2500);
-                        });
+                        }).catch(err => setNotice(err.message));
                       }}
                     >
                       {copiedLink ? (
@@ -2188,8 +2373,11 @@ export default function Messenger({ accountId }: { accountId: string }) {
                   <Settings size={12} /> WORKSPACE
                 </span>
                 <h2>Pengaturan Ruang Tim.</h2>
+                {!workspaceReady && <div role={workspaceLoad.error ? "alert" : "status"}><p>{workspaceLoad.error || "Memuat detail workspace..."}</p>{workspaceLoad.error && <button className="secondary-button" onClick={() => setWorkspaceAttempt(value => value + 1)}>Coba lagi</button>}</div>}
                 {ws && (
                   <>
+                    <p role="status">Akses aktif ? {ws.owner_user_id === accountId ? "Owner" : ws.members?.find(member => member.user_id === accountId)?.role || "Anggota"}</p>
+                    <p>Owner: <b>{ws.members?.find(member => member.user_id === ws.owner_user_id)?.display_name || ws.owner_user_id}</b></p>
                     <label>
                       Nama workspace
                       <input
@@ -2206,8 +2394,9 @@ export default function Messenger({ accountId }: { accountId: string }) {
                     </label>
                     <div style={{ marginTop: "16px" }}>
                       <span style={{ fontSize: "11px", fontWeight: 700, color: "#48594b" }}>
-                        DAFTAR ANGGOTA ({ws.members?.length || 1})
+                        DAFTAR ANGGOTA ({ws.members?.length || 0})
                       </span>
+                      {!ws.members?.length && <p>Belum ada anggota yang ditampilkan.</p>}
                       {ws.members?.map((m) => (
                         <div className="member-edit" key={m.user_id} style={{ marginTop: "8px" }}>
                           <b>{m.display_name}</b>
@@ -2216,6 +2405,13 @@ export default function Messenger({ accountId }: { accountId: string }) {
                         </div>
                       ))}
                     </div>
+                    <h3>Channel yang dapat kamu akses</h3>
+                    {!ws.channels?.length && <p>Belum ada channel yang dapat diakses.</p>}
+                    <div className="workspace-channel-list">{ws.channels?.map(channel => <div className="session-row" key={channel.id}>
+                      <button className="secondary-button" onClick={() => { setSelected(channel.slug); setEditing(null); setEditConflict(false); setDialog(""); }}># {channel.name}</button>
+                      <span>{channel.visibility === "private" ? "Privat ? memiliki akses" : "Publik ? anggota workspace"}</span>
+                      {ws.owner_user_id === accountId && channel.visibility === "private" && <button onClick={() => openPrivateAccess(channel.id)}>Kelola akses</button>}
+                    </div>)}</div>
                   </>
                 )}
               </>
@@ -2226,10 +2422,17 @@ export default function Messenger({ accountId }: { accountId: string }) {
                   <Settings size={12} /> PENGATURAN AKUN
                 </span>
                 <h2>Profil & Preferensi.</h2>
+                {profileConflict && <button className="secondary-button" onClick={async () => {
+                  if (!window.confirm("Ganti draf profil dengan data terbaru dari server?")) return;
+                  try { const me = await api.user.getMe(); setProfile({ name: me.profile.display_name, username: me.profile.username || me.user.username || "", bio: me.profile.bio, status: me.profile.availability, custom: me.profile.custom_status || "", avatar: me.profile.avatar_url || "", banner: me.profile.banner_url || "", revision: me.profile.revision }); setProfileConflict(false); setNotice("Profil terbaru dimuat."); }
+                  catch (err) { setNotice(err instanceof Error ? err.message : "Profil belum dapat dimuat."); }
+                }}>Muat profil terbaru</button>}
                 <div className="settings-tabs">
                   {["Profil", "Perangkat", "Preferensi"].map((x) => (
                     <button
                       key={x}
+                      disabled={mediaPending}
+                      aria-pressed={picker === x || (!picker && x === "Profil")}
                       onClick={() => setPicker(x)}
                       className={
                         (!picker && x === "Profil") || picker === x
@@ -2243,34 +2446,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                 </div>
 
                 {picker === "Perangkat" ? (
-                  <>
-                    <p>Daftar perangkat dan sesi aktif di akun kamu.</p>
-                    {realSessions.length > 0 ? (
-                      realSessions.map((s) => (
-                        <div className="session-row" key={s.id}>
-                          <span>
-                            {s.device_name}
-                            <small>
-                              {s.is_current
-                                ? "Sesi saat ini"
-                                : `IP: ${s.ip_address} • Aktif: ${new Date(
-                                    s.last_active_at
-                                  ).toLocaleDateString("id-ID")}`}
-                            </small>
-                          </span>
-                          {!s.is_current && (
-                            <button onClick={() => handleRevokeSession(s.id)}>
-                              Cabut sesi
-                            </button>
-                          )}
-                        </div>
-                      ))
-                    ) : (
-                      <p className="detail-muted">
-                        Belum ada sesi tambahan yang terdaftar.
-                      </p>
-                    )}
-                  </>
+                  <SessionSettings />
                 ) : picker === "Preferensi" ? (
                   <>
                     <p>Pilih tampilan yang nyaman untuk percakapanmu.</p>
@@ -2290,23 +2466,20 @@ export default function Messenger({ accountId }: { accountId: string }) {
                         style={{
                           backgroundImage: profile.banner
                             ? `url(${profile.banner})`
-                            : undefined,
-                          background: !profile.banner
-                            ? getBanner(profile.username)
-                            : undefined,
+                            : getBanner(profile.username),
                         }}
-                        onClick={() => bannerInputRef.current?.click()}
+
                       >
                         <div className="settings-upload-overlay">
                           <span className="settings-upload-pill">
-                            <Camera size={13} /> Ganti Sampul
+                            Pratinjau banner
                           </span>
                         </div>
                       </div>
 
                       <div
                         className="settings-avatar-wrap-pos"
-                        onClick={() => avatarInputRef.current?.click()}
+
                       >
                         <LuxuryAvatar
                           name={profile.name}
@@ -2315,7 +2488,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                           status={profile.status || "online"}
                         />
                         <div className="settings-avatar-overlay">
-                          <Camera size={18} />
+                          Avatar
                         </div>
                       </div>
 
@@ -2326,56 +2499,19 @@ export default function Messenger({ accountId }: { accountId: string }) {
                         <p className="settings-preview-bio">
                           {profile.bio || "Belum ada bio singkat."}
                         </p>
-                        {uploadingField && (
-                          <div className="uploading-chip">
-                            <span className="upload-spinner" />
-                            <span>
-                              Mengunggah {uploadingField === "avatar" ? "foto" : "banner"}...
-                            </span>
-                          </div>
-                        )}
                       </div>
                     </div>
 
-                    {/* Hidden Inputs for File Upload */}
-                    <input
-                      ref={avatarInputRef}
-                      type="file"
-                      style={{ display: "none" }}
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={(e) => upload(e, "avatar")}
-                    />
-                    <input
-                      ref={bannerInputRef}
-                      type="file"
-                      style={{ display: "none" }}
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={(e) => upload(e, "banner")}
-                    />
-
-                    <div style={{ display: "flex", gap: "10px", marginBottom: "15px" }}>
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        style={{ flex: 1, marginTop: 0 }}
-                        onClick={() => avatarInputRef.current?.click()}
-                      >
-                        <Camera size={14} /> Unggah Foto Profil
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        style={{ flex: 1, marginTop: 0 }}
-                        onClick={() => bannerInputRef.current?.click()}
-                      >
-                        <ImageIcon size={14} /> Unggah Banner
-                      </button>
-                    </div>
+                    <MediaEditor avatar={profile.avatar} banner={profile.banner} onPendingChange={setMediaPending} onSaved={updated => setProfile(previous => ({
+                      ...previous, avatar: updated.avatar_media_id ? updated.avatar_url || previous.avatar : "", banner: updated.banner_media_id ? updated.banner_url || previous.banner : "", revision: updated.revision,
+                    }))} />
 
                     <label>
                       Nama Tampilan
                       <input
-                        value={profile.name}
+                      value={profile.name}
+                        maxLength={64}
+                        disabled={savingProfile}
                         onChange={(e) =>
                           setProfile((x) => ({ ...x, name: e.target.value }))
                         }
@@ -2385,6 +2521,10 @@ export default function Messenger({ accountId }: { accountId: string }) {
                       Username
                       <input
                         value={profile.username}
+                        minLength={3}
+                        maxLength={32}
+                        pattern="[a-zA-Z0-9_]{3,32}"
+                        disabled={savingProfile}
                         onChange={(e) =>
                           setProfile((x) => ({
                             ...x,
@@ -2424,15 +2564,16 @@ export default function Messenger({ accountId }: { accountId: string }) {
                         }
                       >
                         <option value="online">Tersedia (Online)</option>
-                        <option value="busy">Sibuk</option>
-                        <option value="away">Jauh (Away)</option>
+                        <option value="dnd">Sibuk</option>
+                        <option value="idle">Jauh (Away)</option>
+                        <option value="offline">Offline</option>
                       </select>
                     </label>
 
                     <button
                       className="primary-button"
                       onClick={saveProfile}
-                      disabled={savingProfile}
+                      disabled={savingProfile || profileConflict || mediaPending || !isConnected}
                       style={{ width: "100%", marginTop: "16px" }}
                     >
                       {savingProfile ? (
@@ -2469,6 +2610,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
                   <button
                     className="secondary-button"
                     style={{ color: "#bc684d", width: "100%" }}
+                    disabled={mediaPending}
                     onClick={handleLogout}
                   >
                     <LogOut size={14} /> Keluar dari akun (Logout)
@@ -2492,7 +2634,7 @@ export default function Messenger({ accountId }: { accountId: string }) {
       {/* --- WORKSPACE JOIN CARD MODAL (OPENED VIA ?join=[code]) --- */}
       {joinWsOffer && (
         <div className="discord-card-overlay">
-          <div className="discord-join-card">
+          <div className="discord-join-card" ref={joinRef} role="dialog" aria-modal="true" aria-label="Terima undangan workspace" tabIndex={-1}>
             <div
               className="workspace-glow-icon"
               style={{ background: getPalette(joinWsOffer.workspace_name).bg }}

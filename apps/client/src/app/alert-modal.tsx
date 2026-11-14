@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState } from "react";
 import "./auth.css";
+import { useRef } from "react";
+import { useDialogFocus } from "./app/use-dialog-focus";
 
 export type AlertType =
   | "backend_offline"
@@ -16,7 +17,6 @@ export interface AlertModalProps {
   title: string;
   description: string;
   solutionHint?: string;
-  commandSnippet?: string;
   primaryActionLabel?: string;
   onPrimaryAction?: () => void;
   onClose: () => void;
@@ -28,36 +28,35 @@ export function AlertModal({
   title,
   description,
   solutionHint,
-  commandSnippet,
   primaryActionLabel,
   onPrimaryAction,
   onClose,
 }: AlertModalProps) {
-  const [copied, setCopied] = useState(false);
-
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, open, onClose);
   if (!open) return null;
 
   const badgeConfig = {
     backend_offline: {
-      label: "SERVER BACKEND OFFLINE",
+      label: "SEBENTAR ADA KENDALA",
       color: "#d94336",
       bg: "#feebe8",
       border: "#f8b4ad",
     },
     email_not_setup: {
-      label: "PROVIDER RESEND / SMTP PENDING",
+      label: "EMAIL BELUM TERSEDIA",
       color: "#b46914",
       bg: "#fef5e7",
       border: "#fadcb0",
     },
     google_not_setup: {
-      label: "GOOGLE OAUTH PENDING",
+      label: "GOOGLE BELUM TERSEDIA",
       color: "#235ca7",
       bg: "#edf4fd",
       border: "#bed6fa",
     },
     rate_limited: {
-      label: "BATAS FREKUENSI TERLAMPAUI",
+      label: "COBA LAGI SEBENTAR",
       color: "#a35322",
       bg: "#fbf0e8",
       border: "#f3ccb1",
@@ -75,14 +74,6 @@ export function AlertModal({
     border: "#d0ded1",
   };
 
-  const copySnippet = () => {
-    if (commandSnippet) {
-      navigator.clipboard?.writeText(commandSnippet);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
   return (
     <div
       className="alert-modal-backdrop"
@@ -90,6 +81,8 @@ export function AlertModal({
         if (e.target === e.currentTarget) onClose();
       }}
       role="dialog"
+      ref={dialogRef}
+      tabIndex={-1}
       aria-modal="true"
       aria-labelledby="alert-modal-title"
     >
@@ -117,16 +110,7 @@ export function AlertModal({
 
         {solutionHint && (
           <div className="alert-modal-hint">
-            <strong>Langkah Solusi:</strong> {solutionHint}
-          </div>
-        )}
-
-        {commandSnippet && (
-          <div className="alert-snippet-box">
-            <code>{commandSnippet}</code>
-            <button type="button" onClick={copySnippet} className="alert-snippet-copy">
-              {copied ? "Disalin!" : "Salin"}
-            </button>
+            <strong>Yang bisa kamu coba:</strong> {solutionHint}
           </div>
         )}
 

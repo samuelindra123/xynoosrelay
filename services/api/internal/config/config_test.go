@@ -34,6 +34,36 @@ func TestConfig_Defaults(t *testing.T) {
 	}
 }
 
+func TestConfig_UsesNeonCLIObjectStorageEnvironment(t *testing.T) {
+	mockEnv := map[string]string{
+		"AWS_ACCESS_KEY_ID":     "test-access-key",
+		"AWS_SECRET_ACCESS_KEY": "test-storage-secret",
+		"AWS_ENDPOINT_URL_S3":   "https://branch.storage.example.neon.tech",
+		"AWS_REGION":            "us-east-2",
+	}
+	lookup := func(key string) (string, bool) {
+		value, ok := mockEnv[key]
+		return value, ok
+	}
+
+	cfg, err := LoadFromLookup(lookup)
+	if err != nil {
+		t.Fatalf("unexpected config error: %v", err)
+	}
+	if cfg.StorageProvider != "neon" {
+		t.Errorf("expected Neon provider, got %q", cfg.StorageProvider)
+	}
+	if cfg.StorageBucket != "uploads" {
+		t.Errorf("expected uploads bucket, got %q", cfg.StorageBucket)
+	}
+	if cfg.StorageEndpoint != mockEnv["AWS_ENDPOINT_URL_S3"] || cfg.StorageRegion != mockEnv["AWS_REGION"] {
+		t.Error("Neon endpoint or region was not loaded from AWS_* environment variables")
+	}
+	if cfg.StorageAccessKeyID != mockEnv["AWS_ACCESS_KEY_ID"] || cfg.StorageSecretAccessKey != mockEnv["AWS_SECRET_ACCESS_KEY"] {
+		t.Error("Neon credentials were not loaded from AWS_* environment variables")
+	}
+}
+
 func TestConfig_ProductionValidation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -50,12 +80,46 @@ func TestConfig_ProductionValidation(t *testing.T) {
 		{
 			name: "production with all required secrets",
 			env: map[string]string{
-				"APP_ENV":          "production",
-				"DATABASE_URL":     "postgres://user:pass@host/db",
-				"SESSION_HASH_KEY": "supersecret256bitkeyrequiredhere",
-				"OTP_HMAC_KEYS":    "key1:secretkeyversion1",
+				"APP_ENV":                   "production",
+				"API_BASE_URL":              "https://api.example.com",
+				"FRONTEND_URL":              "https://app.example.com",
+				"WEB_ORIGINS":               "https://app.example.com",
+				"GOOGLE_REDIRECT_URI":       "https://api.example.com/v1/auth/google/callback",
+				"DATABASE_URL":              "postgres://user:pass@host/db",
+				"SESSION_HASH_KEY":          "supersecret256bitkeyrequiredhere",
+				"OTP_HMAC_KEYS":             "key1:secretkeyversion1",
+				"STORAGE_PROVIDER":          "neon",
+				"STORAGE_ENDPOINT":          "https://storage.example.neon.tech",
+				"STORAGE_REGION":            "us-east-2",
+				"STORAGE_BUCKET":            "media",
+				"STORAGE_ACCESS_KEY_ID":     "test-access-key",
+				"STORAGE_SECRET_ACCESS_KEY": "test-storage-secret",
+				"RESEND_API_KEY":            "test-resend-key",
+				"RESEND_FROM_EMAIL":         "Relay <noreply@example.com>",
 			},
 			wantError: false,
+		},
+		{
+			name: "production rejects insecure frontend origin",
+			env: map[string]string{
+				"APP_ENV":                   "production",
+				"API_BASE_URL":              "https://api.example.com",
+				"FRONTEND_URL":              "https://app.example.com",
+				"WEB_ORIGINS":               "http://app.example.com",
+				"GOOGLE_REDIRECT_URI":       "https://api.example.com/v1/auth/google/callback",
+				"DATABASE_URL":              "postgres://user:pass@host/db",
+				"SESSION_HASH_KEY":          "supersecret256bitkeyrequiredhere",
+				"OTP_HMAC_KEYS":             "key1:secretkeyversion1",
+				"STORAGE_PROVIDER":          "neon",
+				"STORAGE_ENDPOINT":          "https://storage.example.neon.tech",
+				"STORAGE_REGION":            "us-east-2",
+				"STORAGE_BUCKET":            "media",
+				"STORAGE_ACCESS_KEY_ID":     "test-access-key",
+				"STORAGE_SECRET_ACCESS_KEY": "test-storage-secret",
+				"RESEND_API_KEY":            "test-resend-key",
+				"RESEND_FROM_EMAIL":         "Relay <noreply@example.com>",
+			},
+			wantError: true,
 		},
 		{
 			name: "invalid environment",

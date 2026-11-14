@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import InviteCard from "./InviteCard";
+import { resolveApiBaseURL } from "@/lib/api-url";
 
 export const instant = false;
 
@@ -11,8 +12,13 @@ export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
   const { code } = await params;
-  const apiBase =
-    process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/v1";
+  const apiBase = resolveApiBaseURL(process.env.NEXT_PUBLIC_API_URL, process.env.NODE_ENV || "production");
+  if (!apiBase) {
+    return {
+      title: "Undangan Ruang Kerja | Xynoos Relay",
+      description: "Undangan bergabung ke ruang kerja di platform komunikasi Xynoos Relay.",
+    };
+  }
 
   try {
     const res = await fetch(`${apiBase}/invites/${encodeURIComponent(code)}`, {

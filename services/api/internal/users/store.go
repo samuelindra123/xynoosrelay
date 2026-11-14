@@ -394,8 +394,9 @@ func (s *PGStore) SearchUsers(ctx context.Context, query string, limit int) ([]*
 	sqlQuery := `
 		SELECT u.id::text,
 		       COALESCE(NULLIF(p.display_name, ''), u.username, 'Pengguna') AS display_name,
-		       COALESCE(u.username, p.username, 'user') AS username,
-		       p.avatar_url,
+		       COALESCE(u.username, 'user') AS username,
+		       p.avatar_media_id,
+		       p.banner_media_id,
 		       COALESCE(p.bio, '') AS bio,
 		       COALESCE(p.availability, 'Tersedia') AS availability,
 		       p.custom_status
@@ -404,7 +405,6 @@ func (s *PGStore) SearchUsers(ctx context.Context, query string, limit int) ([]*
 		WHERE u.deleted_at IS NULL AND (
 			$1 = '%%' OR
 			p.display_name ILIKE $1 OR
-			p.username ILIKE $1 OR
 			u.username ILIKE $1
 		)
 		ORDER BY p.updated_at DESC NULLS LAST
@@ -421,7 +421,7 @@ func (s *PGStore) SearchUsers(ctx context.Context, query string, limit int) ([]*
 	for rows.Next() {
 		var r UserSearchResult
 		if err := rows.Scan(
-			&r.ID, &r.DisplayName, &r.Username, &r.AvatarURL, &r.Bio, &r.Availability, &r.CustomStatus,
+			&r.ID, &r.DisplayName, &r.Username, &r.AvatarMediaID, &r.BannerMediaID, &r.Bio, &r.Availability, &r.CustomStatus,
 		); err != nil {
 			return nil, err
 		}

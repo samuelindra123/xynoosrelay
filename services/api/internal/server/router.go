@@ -27,6 +27,7 @@ type Server struct {
 	log               *slog.Logger
 	db                database.DB
 	storageProv       storage.StorageProvider
+	mediaStore        *media.PGStore
 	mediaService      *media.Service
 	sessionService    *session.Service
 	usersService      *users.Service
@@ -56,9 +57,8 @@ func New(cfg *config.Config, log *slog.Logger, db database.DB) *Server {
 			PublicBaseURL:   cfg.StoragePublicBaseURL,
 		})
 		if err != nil {
-			log.Warn("failed to initialize S3 storage; falling back to local storage", "error", err)
-			localProv, _ := storage.NewLocalProvider(cfg.StorageLocalDir, cfg.StoragePublicBaseURL, cfg.SessionHashKey)
-			storageProv = localProv
+			// A remote provider must never silently become ephemeral local storage.
+			panic("remote storage initialization failed: check storage configuration")
 		} else {
 			storageProv = s3Prov
 		}
@@ -75,6 +75,7 @@ func New(cfg *config.Config, log *slog.Logger, db database.DB) *Server {
 
 	// 2. Initialize Media Layer
 	mediaStore := media.NewPGStore(pool)
+	s.mediaStore = mediaStore
 	s.mediaService = media.NewService(mediaStore, storageProv)
 
 	// 3. Initialize Session Layer
@@ -83,7 +84,7 @@ func New(cfg *config.Config, log *slog.Logger, db database.DB) *Server {
 
 	// 4. Initialize Users & Profile Layer
 	usersStore := users.NewPGStore(pool)
-	s.usersService = users.NewService(usersStore, s.mediaService, storageProv)
+	s.usersService = users.NewService(usersStore, s.mediaService, storageProv, cfg.APIBaseURL)
 
 	// 5. Initialize Authentication Layer
 	s.emailSender = auth.NewConfiguredEmailSender(cfg, log)
@@ -153,7 +154,7 @@ func (s *Server) setupRouter() {
 	authHandler := auth.NewHandler(s.authService, s.sessionService, s.usersService, s.cfg.IsProduction(), s.cfg.FrontendURL)
 	usersHandler := users.NewHandler(s.usersService)
 	sessionHandler := session.NewHandler(s.sessionService, s.cfg.IsProduction())
-	mediaHandler := media.NewHandler(s.mediaService)
+	mediaHandler := media.NewHandler(s.mediaService, s.mediaStore)
 	workspacesHandler := workspaces.NewHandler(s.workspacesService)
 	var messagingPool *pgxpool.Pool
 	if s.db != nil {

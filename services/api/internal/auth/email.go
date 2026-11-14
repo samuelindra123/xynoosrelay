@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,9 +31,6 @@ type ResendEmailSender struct {
 
 // NewResendEmailSender creates a new Resend email dispatcher.
 func NewResendEmailSender(apiKey, from string, log *slog.Logger) *ResendEmailSender {
-	if from == "" {
-		from = "XYNOSS Relay <auth@xynoss.app>"
-	}
 	return &ResendEmailSender{
 		apiKey:     apiKey,
 		from:       from,
@@ -42,6 +40,9 @@ func NewResendEmailSender(apiKey, from string, log *slog.Logger) *ResendEmailSen
 }
 
 func (r *ResendEmailSender) SendOTP(ctx context.Context, toEmail, code string) error {
+	if r.apiKey == "" || r.from == "" {
+		return errors.New("email delivery is not configured")
+	}
 	payload := map[string]any{
 		"from":    r.from,
 		"to":      []string{toEmail},

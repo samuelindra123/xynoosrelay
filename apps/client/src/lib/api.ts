@@ -1,7 +1,8 @@
 // XYNOSS Relay — Frontend API Client (Go Backend REST v1)
+import { safeApiError, type SafeApiErrorKind } from "./safe-api-error";
+import { resolveApiBaseURL } from "./api-url";
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/v1";
+export const API_BASE_URL = resolveApiBaseURL(process.env.NEXT_PUBLIC_API_URL, process.env.NODE_ENV || "production");
 
 let inMemoryCsrfToken: string | null = null;
 let inMemorySessionToken: string | null = null;
@@ -23,7 +24,7 @@ export function setSessionToken(token: string | null) {
 export function getCsrfToken(): string | null {
   if (inMemoryCsrfToken) return inMemoryCsrfToken;
   if (typeof window !== "undefined") {
-    return localStorage.getItem("xynoss_csrf") || null;
+    try { return localStorage.getItem("xynoss_csrf") || null; } catch { return null; }
   }
   return null;
 }
@@ -31,11 +32,10 @@ export function getCsrfToken(): string | null {
 export function setCsrfToken(token: string | null) {
   inMemoryCsrfToken = token;
   if (typeof window !== "undefined") {
-    if (token) {
-      localStorage.setItem("xynoss_csrf", token);
-    } else {
-      localStorage.removeItem("xynoss_csrf");
-    }
+    try {
+      if (token) localStorage.setItem("xynoss_csrf", token);
+      else localStorage.removeItem("xynoss_csrf");
+    } catch { /* Keep the in-memory token for this session. */ }
   }
 }
 
@@ -50,13 +50,15 @@ export class ApiError extends Error {
   details?: ApiErrorDetail[];
   status: number;
   requestId?: string;
+  kind: SafeApiErrorKind;
 
   constructor(
     message: string,
     code: string = "INTERNAL_ERROR",
     status: number = 500,
     details?: ApiErrorDetail[],
-    requestId?: string
+    requestId?: string,
+    kind?: SafeApiErrorKind
   ) {
     super(message);
     this.name = "ApiError";
@@ -64,6 +66,7 @@ export class ApiError extends Error {
     this.status = status;
     this.details = details;
     this.requestId = requestId;
+    this.kind = kind || safeApiError(status).kind;
   }
 }
 
@@ -77,6 +80,10 @@ export async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
+  if (!API_BASE_URL) {
+    const safe = safeApiError(0);
+    throw new ApiError(safe.message, "SERVICE_UNAVAILABLE", 0, undefined, undefined, safe.kind);
+  }
   const url = `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
   const method = (options.method || "GET").toUpperCase();
 
@@ -104,12 +111,20 @@ export async function apiFetch<T>(
     headers.set("Authorization", `Bearer ${token}`);
   }
 
-  const res = await fetch(url, {
-    ...options,
-    method,
-    headers,
-    credentials: "include", // Required for HTTP-only session cookies
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      method,
+      headers,
+      signal: options.signal || AbortSignal.timeout(30000),
+      credentials: "include", // Required for HTTP-only session cookies
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    const safe = safeApiError(0);
+    throw new ApiError(safe.message, "SERVICE_UNAVAILABLE", 0, undefined, undefined, safe.kind);
+  }
 
   if (res.status === 204) {
     return {} as T;
@@ -123,20 +138,23 @@ export async function apiFetch<T>(
     } catch {
       // Non-JSON response
       if (!res.ok) {
-        throw new ApiError(text || res.statusText, "HTTP_ERROR", res.status);
+        const safe = safeApiError(res.status);
+        throw new ApiError(safe.message, "REQUEST_FAILED", res.status, undefined, undefined, safe.kind);
       }
-      return text as unknown as T;
+      throw new ApiError("Respons layanan tidak dapat dibaca. Coba lagi.", "INVALID_RESPONSE", 502);
     }
   }
 
   if (!res.ok) {
     const errObj = json?.error || {};
+    const safe = safeApiError(res.status);
     throw new ApiError(
-      errObj.message || res.statusText || "Permintaan gagal",
-      errObj.code || "REQUEST_FAILED",
+      safe.message,
+      res.status >= 500 ? "SERVICE_ERROR" : errObj.code || "REQUEST_FAILED",
       res.status,
       errObj.details,
-      errObj.request_id
+      errObj.request_id,
+      safe.kind
     );
   }
 
@@ -145,7 +163,8 @@ export async function apiFetch<T>(
     setCsrfToken(json.data.csrf_token);
   }
 
-  return (json?.data !== undefined ? json.data : json) as T;
+  if (!json || !("data" in json)) throw new ApiError("Respons layanan tidak lengkap. Coba lagi.", "INVALID_RESPONSE", 502);
+  return json.data as T;
 }
 
 // Data Entities
@@ -160,7 +179,7 @@ export interface UserEntity {
 
 export interface ProfileEntity {
   display_name: string;
-  username: string;
+  username?: string;
   bio?: string;
   avatar_media_id?: string | null;
   banner_media_id?: string | null;
@@ -178,29 +197,28 @@ export interface IdentityEntity {
 
 export interface SessionEntity {
   id: string;
-  device_name: string;
-  device_type: string;
-  ip_address: string;
+  label?: string;
+  platform_hint?: string;
   is_current: boolean;
-  last_active_at: string;
-  expires_at: string;
+  last_seen_at: string;
+  idle_expires_at: string;
+  absolute_expires_at: string;
 }
 
 export interface MediaUploadIntent {
   media_id: string;
   upload_url: string;
   method: string;
-  headers: Record<string, string>;
+  required_headers: Record<string, string>;
   expires_at: string;
 }
 
 export interface MediaAssetEntity {
   id: string;
-  purpose: string;
-  mime_type: string;
-  size_bytes: number;
+  declared_type: string;
+  bytes: number;
   status: string;
-  public_url: string;
+  url?: string;
 }
 
 export interface UserSearchResult {
@@ -208,6 +226,7 @@ export interface UserSearchResult {
   display_name: string;
   username: string;
   avatar_url?: string | null;
+  banner_url?: string | null;
   bio?: string;
   availability?: string;
   custom_status?: string | null;
@@ -218,6 +237,7 @@ export interface ChannelEntity {
   workspace_id: string;
   slug: string;
   name: string;
+  visibility: "public" | "private";
   position: number;
   created_at: string;
 }
@@ -230,6 +250,7 @@ export interface ChannelMessageEntity {
   username: string;
   text: string;
   created_at: string;
+  revision?: number;
 }
 
 export interface DirectConversationEntity {
@@ -298,14 +319,31 @@ export const api = {
     open(userId: string) {
       return apiFetch<DirectConversationEntity>("/conversations/direct", { method: "POST", body: JSON.stringify({ user_id: userId }) });
     },
-    messages(id: string) { return apiFetch<ChannelMessageEntity[]>(`/conversations/${encodeURIComponent(id)}/messages`); },
+    messages(id: string, before?: number) { return apiFetch<ChannelMessageEntity[]>(`/conversations/${encodeURIComponent(id)}/messages${before ? `?before_sequence=${before}` : ""}`); },
+    read(id: string, sequence?: number) { return apiFetch<{ last_read_sequence: number }>(`/conversations/${encodeURIComponent(id)}/read`, sequence === undefined ? {} : { method: "POST", body: JSON.stringify({ last_read_sequence: sequence }) }); },
+    edit(id: string, sequence: number, text: string, revision: number) { return apiFetch<{sequence:number;text:string;revision:number}>(`/conversations/${encodeURIComponent(id)}/messages/${sequence}`, { method:"PATCH", body:JSON.stringify({text,revision}) }); },
+    delete(id: string, sequence: number) { return apiFetch<void>(`/conversations/${encodeURIComponent(id)}/messages/${sequence}`, { method:"DELETE" }); },
+    react(id: string, sequence: number, active: boolean) { return apiFetch<void>(`/conversations/${encodeURIComponent(id)}/messages/${sequence}/reactions/heart`, { method:active?"PUT":"DELETE" }); },
     send(id: string, text: string, requestKey: string) {
       return apiFetch<ChannelMessageEntity>(`/conversations/${encodeURIComponent(id)}/messages`, { method: "POST", headers: { "Idempotency-Key": requestKey }, body: JSON.stringify({ text }) });
     },
   },
   channelMessages: {
-    list(channelId: string) {
-      return apiFetch<ChannelMessageEntity[]>(`/channels/${encodeURIComponent(channelId)}/messages`);
+    async privateAccess(channelId: string) {
+      return apiFetch<{ user_ids: string[] }>(`/channels/${encodeURIComponent(channelId)}/access`);
+    },
+    async grantPrivateAccess(channelId: string, userId: string) {
+      return apiFetch<void>(`/channels/${encodeURIComponent(channelId)}/access`, { method:"PUT", body:JSON.stringify({user_id:userId}) });
+    },
+    async revokePrivateAccess(channelId: string, userId: string) {
+      return apiFetch<void>(`/channels/${encodeURIComponent(channelId)}/access/${encodeURIComponent(userId)}`, { method:"DELETE" });
+    },
+    read(id: string, sequence?: number) { return apiFetch<{ last_read_sequence: number }>(`/channels/${encodeURIComponent(id)}/read`, sequence === undefined ? {} : { method: "POST", body: JSON.stringify({ last_read_sequence: sequence }) }); },
+    edit(id: string, sequence: number, text: string, revision: number) { return apiFetch<{sequence:number;text:string;revision:number}>(`/channels/${encodeURIComponent(id)}/messages/${sequence}`, { method:"PATCH", body:JSON.stringify({text,revision}) }); },
+    delete(id: string, sequence: number) { return apiFetch<void>(`/channels/${encodeURIComponent(id)}/messages/${sequence}`, { method:"DELETE" }); },
+    react(id: string, sequence: number, active: boolean) { return apiFetch<void>(`/channels/${encodeURIComponent(id)}/messages/${sequence}/reactions/heart`, { method:active?"PUT":"DELETE" }); },
+    list(channelId: string, before?: number) {
+      return apiFetch<ChannelMessageEntity[]>(`/channels/${encodeURIComponent(channelId)}/messages${before ? `?before_sequence=${before}` : ""}`);
     },
     send(channelId: string, text: string, requestKey: string) {
       return apiFetch<ChannelMessageEntity>(`/channels/${encodeURIComponent(channelId)}/messages`, {
@@ -317,6 +355,7 @@ export const api = {
   },
   health: {
     async isOnline(): Promise<boolean> {
+      if (!API_BASE_URL) return false;
       try {
         const res = await fetch(`${API_BASE_URL}/health`, {
           method: "GET",
@@ -344,25 +383,24 @@ export const api = {
       configured: boolean;
       error?: string;
     }> {
+      if (!API_BASE_URL) return { configured: false, error: safeApiError(0).message };
       try {
         const res = await fetch(`${API_BASE_URL}/auth/google/start`, {
           method: "GET",
           redirect: "manual",
+          signal: AbortSignal.timeout(4000),
         });
-        if (res.status === 400 || res.status === 503) {
-          const json = await res.json().catch(() => null);
+        if (!res.ok && res.type !== "opaqueredirect" && res.status !== 0) {
           return {
             configured: false,
-            error:
-              json?.error?.message ||
-              "Google OAuth belum dikonfigurasi di server backend.",
+            error: "Masuk dengan Google belum tersedia saat ini. Coba lagi sebentar atau gunakan email.",
           };
         }
         return { configured: true };
       } catch {
         return {
           configured: false,
-          error: "Tidak dapat terhubung ke server backend API.",
+          error: "Kami belum bisa memulai masuk dengan Google. Coba lagi sebentar atau gunakan email.",
         };
       }
     },
@@ -383,6 +421,10 @@ export const api = {
     },
 
     getGoogleStartUrl(redirectUri?: string) {
+      if (!API_BASE_URL) {
+        const safe = safeApiError(0);
+        throw new ApiError(safe.message, "SERVICE_UNAVAILABLE", 0, undefined, undefined, safe.kind);
+      }
       const params = new URLSearchParams();
       if (redirectUri) {
         params.set("return_path", redirectUri);
@@ -451,7 +493,7 @@ export const api = {
     ) {
       const headers: Record<string, string> = {};
       if (revision !== undefined) {
-        headers["If-Match"] = `"${revision}"`;
+        headers["If-Match"] = String(revision);
       }
       return apiFetch<ProfileEntity>("/me/profile", {
         method: "PATCH",
@@ -468,7 +510,7 @@ export const api = {
     },
 
     async deleteAvatar() {
-      return apiFetch<void>("/users/me/avatar", {
+      return apiFetch<ProfileEntity>("/users/me/avatar", {
         method: "DELETE",
       });
     },
@@ -481,23 +523,24 @@ export const api = {
     },
 
     async deleteBanner() {
-      return apiFetch<void>("/users/me/banner", {
+      return apiFetch<ProfileEntity>("/users/me/banner", {
         method: "DELETE",
       });
     },
 
     async getSessions() {
-      return apiFetch<{ sessions: SessionEntity[] }>("/me/sessions");
+      return apiFetch<SessionEntity[]>("/me/sessions");
     },
 
     async searchUsers(query: string = "") {
       return apiFetch<UserSearchResult[]>(
-        `/users/search?q=${encodeURIComponent(query)}`
+        `/users/search?q=${encodeURIComponent(query)}`,
+        { cache: "no-store" }
       );
     },
 
     async revokeSession(sessionId: string) {
-      return apiFetch<void>(`/me/sessions/${sessionId}`, {
+      return apiFetch<void>(`/me/sessions/${encodeURIComponent(sessionId)}`, {
         method: "DELETE",
       });
     },
@@ -506,8 +549,7 @@ export const api = {
   media: {
     async requestUpload(data: {
       purpose: "avatar" | "banner";
-      file_name: string;
-      mime_type: string;
+      content_type: string;
       size_bytes: number;
     }) {
       return apiFetch<MediaUploadIntent>("/media/uploads", {
@@ -516,26 +558,36 @@ export const api = {
       });
     },
 
-    async uploadBinary(uploadUrl: string, file: File | Blob) {
-      const res = await fetch(uploadUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": file.type || "application/octet-stream",
-        },
-        body: file,
+    async uploadBinary(intent: MediaUploadIntent, file: File | Blob, onProgress?: (percent: number) => void) {
+      if (Date.parse(intent.expires_at) <= Date.now()) throw new ApiError("Tautan unggah kedaluwarsa. Mulai unggahan baru.", "UPLOAD_EXPIRED", 410);
+      // Signed storage requests use only the headers returned by the backend.
+      // Never forward session credentials or CSRF tokens to object storage.
+      return new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open(intent.method, intent.upload_url);
+        xhr.timeout = 120000;
+        for (const [name, value] of Object.entries(intent.required_headers || {})) xhr.setRequestHeader(name, value);
+        xhr.upload.onprogress = event => { if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100)); };
+        const failed = () => reject(new ApiError("Unggahan belum berhasil. Periksa koneksi lalu coba lagi.", "STORAGE_UPLOAD_FAILED", 0));
+        xhr.onerror = failed;
+        xhr.ontimeout = failed;
+        xhr.onabort = failed;
+        xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new ApiError(xhr.status === 403 ? "Tautan unggah ditolak atau kedaluwarsa. Mulai unggahan baru." : "Unggahan ditolak penyimpanan. Coba lagi.", "STORAGE_UPLOAD_FAILED", xhr.status));
+        xhr.send(file);
       });
-      if (!res.ok) {
-        throw new ApiError(
-          "Gagal mengunggah biner media ke storage",
-          "STORAGE_UPLOAD_FAILED",
-          res.status
-        );
-      }
+    },
+
+    get(mediaId: string) {
+      return apiFetch<MediaAssetEntity>(`/media/${encodeURIComponent(mediaId)}`);
+    },
+
+    delete(mediaId: string) {
+      return apiFetch<void>(`/media/${encodeURIComponent(mediaId)}`, { method: "DELETE" });
     },
 
     async finalize(mediaId: string) {
-      return apiFetch<{ media: MediaAssetEntity }>(
-        `/media/${mediaId}/finalize`,
+      return apiFetch<MediaAssetEntity>(
+        `/media/${encodeURIComponent(mediaId)}/finalize`,
         {
           method: "POST",
         }
@@ -546,17 +598,16 @@ export const api = {
       // 1. Request upload intent
       const intent = await this.requestUpload({
         purpose,
-        file_name: file.name,
-        mime_type: file.type,
+        content_type: file.type,
         size_bytes: file.size,
       });
 
       // 2. Direct binary PUT
-      await this.uploadBinary(intent.upload_url, file);
+      await this.uploadBinary(intent, file);
 
       // 3. Finalize on backend
       const result = await this.finalize(intent.media_id);
-      return result.media;
+      return result;
     },
   },
 
@@ -565,7 +616,7 @@ export const api = {
       return apiFetch<WorkspaceDetailEntity[]>("/workspaces");
     },
     async get(id: string) {
-      return apiFetch<WorkspaceDetailEntity>(`/workspaces/${id}`);
+      return apiFetch<WorkspaceDetailEntity>(`/workspaces/${encodeURIComponent(id)}`);
     },
     async create(data: { name: string; description?: string }) {
       return apiFetch<WorkspaceDetailEntity>("/workspaces", {
@@ -573,23 +624,23 @@ export const api = {
         body: JSON.stringify(data),
       });
     },
-    async createChannel(workspaceId: string, data: { name: string }) {
-      return apiFetch<ChannelEntity>(`/workspaces/${workspaceId}/channels`, {
+    async createChannel(workspaceId: string, data: { name: string; visibility?: "public" | "private" }) {
+      return apiFetch<ChannelEntity>(`/workspaces/${encodeURIComponent(workspaceId)}/channels`, {
         method: "POST",
         body: JSON.stringify(data),
       });
     },
     async createInvite(workspaceId: string, data?: { duration_hours?: number; max_uses?: number }) {
-      return apiFetch<CreateInviteResponse>(`/workspaces/${workspaceId}/invites`, {
+      return apiFetch<CreateInviteResponse>(`/workspaces/${encodeURIComponent(workspaceId)}/invites`, {
         method: "POST",
         body: JSON.stringify(data || {}),
       });
     },
     async listInvites(workspaceId: string) {
-      return apiFetch<WorkspaceInviteEntity[]>(`/workspaces/${workspaceId}/invites`);
+      return apiFetch<WorkspaceInviteEntity[]>(`/workspaces/${encodeURIComponent(workspaceId)}/invites`);
     },
     async revokeInvite(workspaceId: string, inviteId: string) {
-      return apiFetch<void>(`/workspaces/${workspaceId}/invites/${inviteId}`, {
+      return apiFetch<void>(`/workspaces/${encodeURIComponent(workspaceId)}/invites/${encodeURIComponent(inviteId)}`, {
         method: "DELETE",
       });
     },
@@ -597,10 +648,10 @@ export const api = {
 
   invites: {
     async getPreview(code: string) {
-      return apiFetch<InvitePreviewEntity>(`/invites/${code}`);
+      return apiFetch<InvitePreviewEntity>(`/invites/${encodeURIComponent(code)}`);
     },
     async accept(code: string) {
-      return apiFetch<WorkspaceDetailEntity>(`/invites/${code}/accept`, {
+      return apiFetch<WorkspaceDetailEntity>(`/invites/${encodeURIComponent(code)}/accept`, {
         method: "POST",
       });
     },

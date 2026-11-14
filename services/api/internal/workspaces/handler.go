@@ -125,7 +125,8 @@ func (h *Handler) GetWorkspace(w http.ResponseWriter, r *http.Request) {
 }
 
 type createChannelReq struct {
-	Name string `json:"name"`
+	Name       string `json:"name"`
+	Visibility string `json:"visibility"`
 }
 
 func (h *Handler) CreateChannel(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +142,10 @@ func (h *Handler) CreateChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ch, err := h.service.CreateChannel(r.Context(), wsID, actor.UserID, req.Name)
+	if req.Visibility == "" {
+		req.Visibility = "public"
+	}
+	ch, err := h.service.CreateChannel(r.Context(), wsID, actor.UserID, req.Name, req.Visibility)
 	if err != nil {
 		if IsInvalidInput(err) {
 			response.RenderError(w, r, response.NewValidationErrorSingle("name", "channel name must contain 1–50 characters"))

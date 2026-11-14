@@ -25,10 +25,10 @@ var (
 type Store interface {
 	CreateWorkspace(ctx context.Context, ownerID, name, slug, description string) (*Workspace, *Channel, error)
 	GetUserWorkspaces(ctx context.Context, userID string) ([]*WorkspaceDetail, error)
-	GetWorkspaceByID(ctx context.Context, workspaceID string) (*WorkspaceDetail, error)
+	GetWorkspaceByID(ctx context.Context, workspaceID, actorID string) (*WorkspaceDetail, error)
 	RequireWorkspaceMembership(ctx context.Context, workspaceID, userID string) error
 	RequireWorkspaceCapability(ctx context.Context, workspaceID, userID, capability string) error
-	CreateChannel(ctx context.Context, workspaceID, name, slug string) (*Channel, error)
+	CreateChannel(ctx context.Context, workspaceID, actorID, name, slug, visibility string) (*Channel, error)
 	CreateInvitation(ctx context.Context, workspaceID, userID, code string, expiresAt time.Time, maxUses int) (*Invitation, error)
 	GetInvitationByCode(ctx context.Context, code string) (*Invitation, *Workspace, *InvitePreview, error)
 	AcceptInvitation(ctx context.Context, code, userID string) (*WorkspaceDetail, error)
@@ -90,6 +90,7 @@ func (s *PGStore) CreateWorkspace(ctx context.Context, ownerID, name, slug, desc
 		return nil, nil, fmt.Errorf("failed to insert default channel: %w", err)
 	}
 	ch.CreatedAt = time.Now().UTC()
+	ch.Visibility = "public"
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, fmt.Errorf("failed to commit workspace tx: %w", err)
@@ -132,7 +133,7 @@ func (s *PGStore) GetUserWorkspaces(ctx context.Context, userID string) ([]*Work
 	rows.Close() // Release this connection before loading workspace details.
 	details := make([]*WorkspaceDetail, 0, len(ids))
 	for _, id := range ids {
-		det, err := s.GetWorkspaceByID(ctx, id)
+		det, err := s.GetWorkspaceByID(ctx, id, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -142,7 +143,7 @@ func (s *PGStore) GetUserWorkspaces(ctx context.Context, userID string) ([]*Work
 	return details, nil
 }
 
-func (s *PGStore) GetWorkspaceByID(ctx context.Context, workspaceID string) (*WorkspaceDetail, error) {
+func (s *PGStore) GetWorkspaceByID(ctx context.Context, workspaceID, actorID string) (*WorkspaceDetail, error) {
 	if s.pool == nil {
 		return nil, errors.New("database pool is disconnected")
 	}
@@ -166,18 +167,19 @@ func (s *PGStore) GetWorkspaceByID(ctx context.Context, workspaceID string) (*Wo
 
 	// Fetch channels
 	cRows, err := s.pool.Query(ctx, `
-		SELECT id, workspace_id, slug, name, position
-		FROM channels
-		WHERE workspace_id = $1 AND deleted_at IS NULL
+		SELECT c.id, c.workspace_id, c.slug, c.name, c.position,c.visibility
+		FROM channels c JOIN memberships m ON m.workspace_id=c.workspace_id AND m.user_id=$2 AND m.state='active'
+		JOIN workspaces w ON w.id=c.workspace_id AND w.deleted_at IS NULL
+		WHERE c.workspace_id = $1 AND c.deleted_at IS NULL AND (c.visibility='public' OR w.owner_user_id=$2 OR EXISTS (SELECT 1 FROM channel_acl acl WHERE acl.channel_id=c.id AND acl.subject_type='user' AND acl.subject_id=$2 AND acl.capability='channel.read' AND acl.effect='allow'))
 		ORDER BY position ASC
-	`, workspaceID)
+	`, workspaceID, actorID)
 	if err != nil {
 		return nil, fmt.Errorf("load channels: %w", err)
 	}
 	{
 		for cRows.Next() {
 			var ch Channel
-			if err := cRows.Scan(&ch.ID, &ch.WorkspaceID, &ch.Slug, &ch.Name, &ch.Position); err != nil {
+			if err := cRows.Scan(&ch.ID, &ch.WorkspaceID, &ch.Slug, &ch.Name, &ch.Position, &ch.Visibility); err != nil {
 				cRows.Close()
 				return nil, err
 			} else {
@@ -288,21 +290,28 @@ func (s *PGStore) RequireWorkspaceCapability(ctx context.Context, workspaceID, u
 	return nil
 }
 
-func (s *PGStore) CreateChannel(ctx context.Context, workspaceID, name, slug string) (*Channel, error) {
+func (s *PGStore) CreateChannel(ctx context.Context, workspaceID, actorID, name, slug, visibility string) (*Channel, error) {
 	if s.pool == nil {
 		return nil, errors.New("database pool is disconnected")
 	}
 
 	var ch Channel
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO channels (workspace_id, slug, name, position)
-		VALUES ($1, $2, $3, 0)
-		RETURNING id, workspace_id, slug, name, position
-	`, workspaceID, slug, name).Scan(
-		&ch.ID, &ch.WorkspaceID, &ch.Slug, &ch.Name, &ch.Position,
-	)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `INSERT INTO channels (workspace_id, slug, name, visibility, position) VALUES ($1,$2,$3,$4,0) RETURNING id,workspace_id,slug,name,position,visibility`, workspaceID, slug, name, visibility).Scan(&ch.ID, &ch.WorkspaceID, &ch.Slug, &ch.Name, &ch.Position, &ch.Visibility)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create channel: %w", err)
+	}
+	if visibility == "private" {
+		if _, err = tx.Exec(ctx, `INSERT INTO channel_acl(channel_id,subject_type,subject_id,capability,effect) VALUES($1,'user',$2,'channel.read','allow')`, ch.ID, actorID); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	ch.CreatedAt = time.Now().UTC()
 	return &ch, nil
@@ -430,6 +439,12 @@ func (s *PGStore) AcceptInvitation(ctx context.Context, code, userID string) (*W
 		if command.RowsAffected() == 0 {
 			return nil, ErrForbidden
 		}
+		// A rejoining member must receive fresh grants for private channels.
+		// Otherwise an old channel ACL would silently restore access after rejoin.
+		_, err = tx.Exec(ctx, `DELETE FROM channel_acl a USING channels c WHERE a.channel_id=c.id AND c.workspace_id=$1 AND a.subject_type='user' AND a.subject_id=$2 AND a.capability='channel.read'`, wsID, userID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to clear stale private channel access: %w", err)
+		}
 
 		// Increment invitation use count
 		_, err = tx.Exec(ctx, `
@@ -444,7 +459,7 @@ func (s *PGStore) AcceptInvitation(ctx context.Context, code, userID string) (*W
 		return nil, fmt.Errorf("failed to commit accept tx: %w", err)
 	}
 
-	return s.GetWorkspaceByID(ctx, wsID)
+	return s.GetWorkspaceByID(ctx, wsID, userID)
 }
 
 func (s *PGStore) ListInvitations(ctx context.Context, workspaceID string) ([]*InviteListItem, error) {

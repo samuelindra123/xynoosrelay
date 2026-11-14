@@ -83,19 +83,19 @@ func (s *Service) GetWorkspaceByID(ctx context.Context, workspaceID, actorID str
 	if err := s.store.RequireWorkspaceMembership(ctx, workspaceID, actorID); err != nil {
 		return nil, err
 	}
-	return s.store.GetWorkspaceByID(ctx, workspaceID)
+	return s.store.GetWorkspaceByID(ctx, workspaceID, actorID)
 }
 
-func (s *Service) CreateChannel(ctx context.Context, workspaceID, actorID, name string) (*Channel, error) {
+func (s *Service) CreateChannel(ctx context.Context, workspaceID, actorID, name, visibility string) (*Channel, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len([]rune(name)) > 50 {
+	if name == "" || len([]rune(name)) > 50 || (visibility != "public" && visibility != "private") {
 		return nil, ErrInvalidChannelInput
 	}
 	if err := s.store.RequireWorkspaceCapability(ctx, workspaceID, actorID, "workspace.channels.create"); err != nil {
 		return nil, err
 	}
 	slug := Slugify(name)
-	return s.store.CreateChannel(ctx, workspaceID, name, slug)
+	return s.store.CreateChannel(ctx, workspaceID, actorID, name, slug, visibility)
 }
 
 func (s *Service) CreateInvitation(ctx context.Context, workspaceID, userID string, duration time.Duration, maxUses int) (*Invitation, string, error) {

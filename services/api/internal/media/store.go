@@ -31,6 +31,21 @@ func NewPGStore(pool *pgxpool.Pool) *PGStore {
 	return &PGStore{pool: pool}
 }
 
+// IsProfileMedia reports whether an image is currently attached to a public user profile.
+func (s *PGStore) IsProfileMedia(ctx context.Context, mediaID string) (bool, error) {
+	if s.pool == nil {
+		return false, errors.New("database pool is disconnected")
+	}
+	var attached bool
+	err := s.pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM profiles WHERE avatar_media_id = $1 OR banner_media_id = $1
+	)`, mediaID).Scan(&attached)
+	if err != nil {
+		return false, fmt.Errorf("failed to check profile media visibility: %w", err)
+	}
+	return attached, nil
+}
+
 func (s *PGStore) Create(ctx context.Context, m *Media) (*Media, error) {
 	if s.pool == nil {
 		return nil, errors.New("database pool is disconnected")

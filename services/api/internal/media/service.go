@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -143,6 +144,27 @@ func (s *Service) GetMedia(ctx context.Context, mediaID string) (*Media, error) 
 
 	m.URL = s.provider.PublicURL(m.ObjectKey)
 	return m, nil
+}
+
+// GetProfileContent returns ready image bytes for the public profile-media proxy.
+// The HTTP handler separately checks that the ID is currently attached to a profile.
+func (s *Service) GetProfileContent(ctx context.Context, mediaID string) (io.ReadCloser, string, error) {
+	m, err := s.store.GetByID(ctx, mediaID)
+	if err != nil {
+		return nil, "", err
+	}
+	if m.Status != StatusReady {
+		return nil, "", ErrInvalidMediaState
+	}
+	rc, contentType, err := s.provider.GetObject(ctx, m.ObjectKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read profile media: %w", err)
+	}
+	if m.DetectedType != nil && contentType != *m.DetectedType {
+		_ = rc.Close()
+		return nil, "", errors.New("stored profile media type does not match its validated type")
+	}
+	return rc, contentType, nil
 }
 
 // DeleteMedia deletes media from database and purges object from storage provider.

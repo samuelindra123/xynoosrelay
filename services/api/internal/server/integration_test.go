@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"log/slog"
 	"net/http"
@@ -29,24 +33,236 @@ func setupTestServer(t *testing.T) (*Server, func()) {
 	if err != nil {
 		t.Fatalf("failed to load test config: %v", err)
 	}
+	if configuredDB := strings.TrimSpace(cfg.DatabaseURL); configuredDB != "" && testDB == configuredDB {
+		t.Fatal("refusing to run integration tests: TEST_DATABASE_URL matches configured DATABASE_URL")
+	}
 	cfg.DatabaseURL = testDB
 	cfg.AppEnv = config.EnvTest
+	cfg.ResendAPIKey = ""
+	cfg.EmailFrom = ""
+	cfg.SMTPHost = ""
+	cfg.SMTPUser = ""
+	cfg.SMTPPass = ""
+	cfg.StorageProvider = "local"
+	cfg.StorageLocalDir = t.TempDir()
+	cfg.StoragePublicBaseURL = "http://integration.test/v1/media/content"
+	if len(cfg.InternalAPIKeys) == 0 {
+		cfg.InternalAPIKeys = []string{"integration-test-key"}
+	}
 
 	nullLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ctx := context.Background()
-
 	pool, err := database.NewPool(ctx, cfg, nullLogger)
 	if err != nil {
 		t.Skipf("skipping test: database connection pool initialization failed: %v", err)
 		return nil, func() {}
 	}
-
 	srv := New(cfg, nullLogger, pool)
-	cleanup := func() {
-		pool.Close()
+	if srv.EmailSender() == nil {
+		t.Fatal("integration server must use the in-memory email sandbox")
+	}
+	cleanup := func() { pool.Close() }
+	return srv, cleanup
+}
+
+func integrationPNG(t *testing.T) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.SetRGBA(0, 0, color.RGBA{R: 20, G: 120, B: 220, A: 255})
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func createIntegrationUser(t *testing.T, srv *Server, username string) (string, string, string) {
+	t.Helper()
+	ctx := context.Background()
+	userID := uuid.NewString()
+	uniqueUsername := username + "_" + uuid.NewString()[:8]
+	email := uniqueUsername + "@example.com"
+	_, err := srv.db.RawPool().Exec(ctx, `INSERT INTO users (id, username, username_normalized, onboarding_completed_at) VALUES ($1,$2,$2,NOW()); INSERT INTO profiles (user_id, display_name) VALUES ($1,$2); INSERT INTO identities (user_id, provider, provider_subject, verified_email_normalized) VALUES ($1,'integration',$3,$3)`, userID, uniqueUsername, email)
+	if err != nil {
+		t.Fatalf("create integration user: %v", err)
+	}
+	tokens, _, csrf, err := srv.sessionService.CreateSession(ctx, userID, "integration-test")
+	if err != nil {
+		t.Fatalf("create integration session: %v", err)
+	}
+	return userID, tokens.Token, csrf
+}
+
+func integrationRequest(t *testing.T, client *http.Client, baseURL, token, method, path, body string, status int) []byte {
+	t.Helper()
+	req, err := http.NewRequest(method, baseURL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	if method == http.MethodPost && strings.HasSuffix(path, "/messages") {
+		req.Header.Set("Idempotency-Key", uuid.NewString())
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != status {
+		t.Fatalf("%s %s: expected %d, got %d: %s", method, path, status, resp.StatusCode, string(data))
+	}
+	return data
+}
+
+func TestAPI_EndToEndRemainingAuthorizationMediaAndConcurrency(t *testing.T) {
+	srv, cleanup := setupTestServer(t)
+	defer cleanup()
+	ts := httptest.NewServer(srv.Router())
+	defer ts.Close()
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	ownerID, ownerToken, _ := createIntegrationUser(t, srv, "audit-owner")
+	memberID, memberToken, _ := createIntegrationUser(t, srv, "audit-member")
+	outsiderID, outsiderToken, _ := createIntegrationUser(t, srv, "audit-outsider")
+	defer func() {
+		_, _ = srv.db.RawPool().Exec(context.Background(), `DELETE FROM workspaces WHERE owner_user_id IN ($1,$2,$3)`, ownerID, memberID, outsiderID)
+		for _, id := range []string{ownerID, memberID, outsiderID} {
+			_, _ = srv.db.RawPool().Exec(context.Background(), `DELETE FROM users WHERE id=$1`, id)
+		}
+	}()
+
+	workspaceBody := integrationRequest(t, client, ts.URL, ownerToken, http.MethodPost, "/v1/workspaces", `{"name":"Audit Workspace `+uuid.NewString()[:8]+`"}`, http.StatusCreated)
+	var workspace struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(workspaceBody, &workspace); err != nil || workspace.Data.ID == "" {
+		t.Fatalf("workspace response missing id: %s", workspaceBody)
+	}
+	workspaceID := workspace.Data.ID
+	if _, err := srv.db.RawPool().Exec(context.Background(), `INSERT INTO memberships (workspace_id,user_id,state) VALUES ($1,$2,'active')`, workspaceID, memberID); err != nil {
+		t.Fatalf("add member: %v", err)
 	}
 
-	return srv, cleanup
+	// Workspace retrieval and user search exercise persistence and authorization boundaries.
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodGet, "/v1/workspaces/"+workspaceID, "", http.StatusOK)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodGet, "/v1/workspaces/"+workspaceID, "", http.StatusOK)
+	integrationRequest(t, client, ts.URL, outsiderToken, http.MethodGet, "/v1/workspaces/"+workspaceID, "", http.StatusForbidden)
+	search := integrationRequest(t, client, ts.URL, ownerToken, http.MethodGet, "/v1/users/search?q=audit-member&limit=5", "", http.StatusOK)
+	if !strings.Contains(string(search), memberID) {
+		t.Fatalf("user search did not return persisted member: %s", search)
+	}
+
+	// Private channel access is denied before an ACL grant and allowed afterward.
+	channelBody := integrationRequest(t, client, ts.URL, ownerToken, http.MethodPost, "/v1/workspaces/"+workspaceID+"/channels", `{"name":"Private Audit","visibility":"private"}`, http.StatusCreated)
+	var channel struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(channelBody, &channel); err != nil || channel.Data.ID == "" {
+		t.Fatalf("channel response missing id: %s", channelBody)
+	}
+	channelID := channel.Data.ID
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodGet, "/v1/channels/"+channelID+"/messages", "", http.StatusNotFound)
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodPut, "/v1/channels/"+channelID+"/access", `{"user_id":"`+memberID+`"}`, http.StatusNoContent)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodGet, "/v1/channels/"+channelID+"/messages", "", http.StatusOK)
+	integrationRequest(t, client, ts.URL, outsiderToken, http.MethodPut, "/v1/channels/"+channelID+"/access", `{"user_id":"`+outsiderID+`"}`, http.StatusNotFound)
+
+	msg := integrationRequest(t, client, ts.URL, ownerToken, http.MethodPost, "/v1/channels/"+channelID+"/messages", `{"text":"editable"}`, http.StatusCreated)
+	var message struct {
+		Data struct {
+			Sequence int64 `json:"sequence"`
+			Revision int   `json:"revision"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(msg, &message); err != nil || message.Data.Sequence == 0 {
+		t.Fatalf("message response missing sequence: %s", msg)
+	}
+	seq := message.Data.Sequence
+	editPath := "/v1/channels/" + channelID + "/messages/" + fmt.Sprint(seq)
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodPatch, editPath, `{"text":"edited","revision":1}`, http.StatusOK)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPatch, editPath, `{"text":"hijack","revision":2}`, http.StatusConflict)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPut, editPath+"/reactions/heart", `{}`, http.StatusNoContent)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPut, editPath+"/reactions/heart", `{}`, http.StatusNoContent)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPost, "/v1/channels/"+channelID+"/read", `{"last_read_sequence":1}`, http.StatusOK)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPost, "/v1/channels/"+channelID+"/read", `{"last_read_sequence":0}`, http.StatusOK)
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodDelete, editPath, `{}`, http.StatusNoContent)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPut, editPath+"/reactions/heart", `{}`, http.StatusNotFound)
+
+	// Avatar upload/finalize/attach/remove verifies object storage and profile persistence.
+	pngData := integrationPNG(t)
+	intentBody := integrationRequest(t, client, ts.URL, ownerToken, http.MethodPost, "/v1/media/uploads", `{"purpose":"avatar","content_type":"image/png","size_bytes":`+fmt.Sprint(len(pngData))+`}`, http.StatusCreated)
+	var intent struct {
+		Data struct {
+			MediaID   string `json:"media_id"`
+			ObjectKey string `json:"object_key"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(intentBody, &intent); err != nil || intent.Data.MediaID == "" {
+		t.Fatalf("media intent response missing id: %s", intentBody)
+	}
+	if _, err := srv.storageProv.PutObject(context.Background(), intent.Data.ObjectKey, bytes.NewReader(pngData), int64(len(pngData)), "image/png"); err != nil {
+		t.Fatalf("put avatar object: %v", err)
+	}
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodPost, "/v1/media/"+intent.Data.MediaID+"/finalize", `{}`, http.StatusOK)
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodPost, "/v1/users/me/avatar", `{"media_id":"`+intent.Data.MediaID+`"}`, http.StatusOK)
+	integrationRequest(t, client, ts.URL, memberToken, http.MethodPost, "/v1/users/me/avatar", `{"media_id":"`+intent.Data.MediaID+`"}`, http.StatusForbidden)
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodDelete, "/v1/users/me/avatar", `{}`, http.StatusOK)
+
+	// Two independent sessions can be revoked concurrently; the target session is no longer valid.
+	tokens, sess, _, err := srv.sessionService.CreateSession(context.Background(), ownerID, "second-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	integrationRequest(t, client, ts.URL, ownerToken, http.MethodDelete, "/v1/me/sessions/"+sess.ID, `{}`, http.StatusNoContent)
+	if _, err := srv.sessionService.ValidateSessionToken(context.Background(), tokens.Token); err == nil {
+		t.Fatal("explicit session revocation did not invalidate the target session")
+	}
+
+	tokens, sess, _, err = srv.sessionService.CreateSession(context.Background(), ownerID, "concurrent-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var revokeErrs [2]error
+	start := make(chan struct{})
+	for i := range revokeErrs {
+		go func(i int) {
+			<-start
+			_, revokeErrs[i] = srv.db.RawPool().Exec(context.Background(), `UPDATE sessions SET revoked_at=NOW() WHERE id=$1 AND revoked_at IS NULL`, sess.ID)
+		}(i)
+	}
+	close(start)
+	time.Sleep(50 * time.Millisecond)
+	for _, err := range revokeErrs {
+		if err != nil {
+			t.Fatalf("concurrent session revocation: %v", err)
+		}
+	}
+	if _, err := srv.sessionService.ValidateSessionToken(context.Background(), tokens.Token); err == nil {
+		t.Fatal("revoked concurrent session remained valid")
+	}
+}
+
+func cleanupTestAccount(t *testing.T, srv *Server, email string) {
+	t.Helper()
+	pool := srv.db.RawPool()
+	userIDs := `SELECT user_id FROM identities WHERE verified_email_normalized = $1`
+	if _, err := pool.Exec(context.Background(), `DELETE FROM workspaces WHERE owner_user_id IN (`+userIDs+`)`, email); err != nil {
+		t.Errorf("cleanup test workspaces: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM conversation_members WHERE user_id IN (`+userIDs+`))`, email); err != nil {
+		t.Errorf("cleanup test conversations: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `DELETE FROM users WHERE id IN (`+userIDs+`)`, email); err != nil {
+		t.Errorf("cleanup test account: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `DELETE FROM otp_challenges WHERE email_normalized = $1`, email); err != nil {
+		t.Errorf("cleanup test OTP challenges: %v", err)
+	}
 }
 
 func TestAPI_EndToEndAuthAndProfileFlow(t *testing.T) {
@@ -61,7 +277,8 @@ func TestAPI_EndToEndAuthAndProfileFlow(t *testing.T) {
 	defer ts.Close()
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	testEmail := "e2e-user-" + time.Now().Format("150405") + "@example.com"
+	testEmail := "e2e-user-" + uuid.NewString() + "@example.com"
+	defer cleanupTestAccount(t, srv, testEmail)
 
 	// 1. Request OTP challenge
 	reqBody, _ := json.Marshal(map[string]string{"email": testEmail})
@@ -444,7 +661,8 @@ func TestAPI_CSRFProtectionEnforcement(t *testing.T) {
 	defer ts.Close()
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	testEmail := "csrf-user-" + time.Now().Format("150405") + "@example.com"
+	testEmail := "csrf-user-" + uuid.NewString() + "@example.com"
+	defer cleanupTestAccount(t, srv, testEmail)
 
 	// 1. Request and verify OTP to obtain session
 	reqBody, _ := json.Marshal(map[string]string{"email": testEmail})
